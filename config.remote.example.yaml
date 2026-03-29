@@ -12,6 +12,8 @@ default_mode: update
 sources:
   - path: /home/you/projects/app
     name: app
+  # - path: /home/you/big
+  #   enable: false
   # Несколько целей; у объекта в targets можно задать свой mode:
   # - path: /home/you/photos
   #   name: photos

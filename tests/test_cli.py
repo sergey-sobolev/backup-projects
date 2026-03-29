@@ -151,6 +151,37 @@ def test_normalize_sources_bad_entry():
         normalize_sources([123], "update", GT, CFG0)
 
 
+def test_normalize_sources_enable_false_skips():
+    raw = [
+        {"path": "/a", "enable": False},
+        "/b",
+        {"path": "/c", "enable": True},
+    ]
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/b", "b", [(GT, "update", False, None)]),
+        ("/c", "c", [(GT, "update", False, None)]),
+    ]
+
+
+def test_normalize_sources_enable_invalid_type():
+    with pytest.raises(BackupError, match="source enable must be a boolean"):
+        normalize_sources([{"path": "/a", "enable": "no"}], "update", GT, CFG0)
+
+
+def test_normalize_sources_all_disabled_empty_list():
+    assert normalize_sources([{"path": "/a", "enable": False}], "update", GT, CFG0) == []
+
+
+def test_run_from_config_all_sources_disabled_raises(tmp_path: Path):
+    with pytest.raises(BackupError, match="sources must be a non-empty list"):
+        run_from_config(
+            {
+                "target": str(tmp_path),
+                "sources": [{"path": str(tmp_path), "enable": False}],
+            }
+        )
+
+
 def test_normalize_sources_targets_non_string_non_dict():
     with pytest.raises(BackupError, match="targets entries must be"):
         normalize_sources([{"path": "/a", "targets": [1]}], "update", GT, CFG0)
@@ -303,6 +334,32 @@ def test_resolve_log_path_full_path_ignores_log_filename():
     cfg = {"log_filename": "ignored.log", "log_file": "/var/log/other.log"}
     p = resolve_log_path(cfg, None)
     assert p == Path("/var/log/other.log")
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_skips_disabled_source(tmp_path: Path):
+    on = tmp_path / "on" / "d"
+    on.mkdir(parents=True)
+    (on / "x").write_text("1", encoding="utf-8")
+    off = tmp_path / "off" / "d"
+    off.mkdir(parents=True)
+    (off / "y").write_text("2", encoding="utf-8")
+    dst = tmp_path / "dst"
+    log_f = tmp_path / "en.log"
+    cfg = {
+        "target": str(dst),
+        "default_mode": "update",
+        "sources": [
+            {"path": str(off), "name": "off", "enable": False},
+            {"path": str(on), "name": "on"},
+        ],
+        "success_flag": ".ok",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    assert (dst / "on" / "x").read_text() == "1"
+    assert not (dst / "off").exists()
 
 
 @pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")

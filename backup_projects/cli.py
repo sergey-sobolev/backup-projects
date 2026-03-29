@@ -128,6 +128,12 @@ def normalize_sources(
             rot, mc = merge_tgz_rotate(cfg, None, None)
             out.append((p, name, [(gt, default_mode, rot, mc)]))
         elif isinstance(item, dict):
+            if "enable" in item:
+                ev = item["enable"]
+                if not isinstance(ev, bool):
+                    raise BackupError("source enable must be a boolean")
+                if not ev:
+                    continue
             p = item.get("path")
             if not p:
                 raise BackupError("each source object needs 'path'")

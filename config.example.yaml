@@ -12,9 +12,11 @@ target: /media/usb/backup
 #   tgz    — архив .tgz, затем перенос архива(ов) через rsync
 default_mode: update
 
-# Список каталогов-источников (строка или объект с path; опционально name, mode, target или targets)
+# Список каталогов-источников (строка или объект с path; опционально enable, name, mode, target или targets)
 sources:
   - /home/user/projects/myapp
+  # - path: /home/user/skipped
+  #   enable: false
   - path: /home/user/documents
     name: docs
   # Несколько целей: строки (режим = mode источника) и объекты { target, mode? }

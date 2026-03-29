@@ -5,7 +5,7 @@ with open("README.md", encoding="utf-8") as f:
 
 setup(
     name="backup-projects",
-    version="0.3.1",
+    version="0.3.2",
     description="YAML-driven project backups with rsync",
     long_description=long_description,
     long_description_content_type="text/markdown",
