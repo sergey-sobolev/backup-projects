@@ -25,16 +25,16 @@ GT = "/default/backup"
 def test_normalize_sources_strings():
     raw = ["/a/b/foo", "/c/d"]
     assert normalize_sources(raw, "update", GT) == [
-        ("/a/b/foo", "foo", "update", [GT]),
-        ("/c/d", "d", "update", [GT]),
+        ("/a/b/foo", "foo", [(GT, "update")]),
+        ("/c/d", "d", [(GT, "update")]),
     ]
 
 
 def test_normalize_sources_objects():
     raw = [{"path": "/x/y", "name": "custom"}, {"path": "/z"}]
     assert normalize_sources(raw, "copy", GT) == [
-        ("/x/y", "custom", "copy", [GT]),
-        ("/z", "z", "copy", [GT]),
+        ("/x/y", "custom", [(GT, "copy")]),
+        ("/z", "z", [(GT, "copy")]),
     ]
 
 
@@ -45,30 +45,73 @@ def test_normalize_sources_per_source_mode():
         {"path": "/c", "name": "see", "mode": "copy"},
     ]
     assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", "tgz", [GT]),
-        ("/b", "b", "update", [GT]),
-        ("/c", "see", "copy", [GT]),
+        ("/a", "a", [(GT, "tgz")]),
+        ("/b", "b", [(GT, "update")]),
+        ("/c", "see", [(GT, "copy")]),
     ]
 
 
 def test_normalize_sources_per_source_target():
     raw = [{"path": "/a", "target": "/mnt/usb"}]
     assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", "update", ["/mnt/usb"]),
+        ("/a", "a", [("/mnt/usb", "update")]),
     ]
 
 
 def test_normalize_sources_targets_list():
     raw = [{"path": "/a", "targets": ["/t1", "/t2"]}]
     assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", "update", ["/t1", "/t2"]),
+        ("/a", "a", [("/t1", "update"), ("/t2", "update")]),
     ]
+
+
+def test_normalize_sources_targets_mixed_modes():
+    raw = [
+        {
+            "path": "/a",
+            "mode": "update",
+            "targets": [
+                "/inc",
+                {"target": "/snap", "mode": "copy"},
+                {"target": "/arc"},
+            ],
+        }
+    ]
+    assert normalize_sources(raw, "tgz", GT) == [
+        (
+            "/a",
+            "a",
+            [
+                ("/inc", "update"),
+                ("/snap", "copy"),
+                ("/arc", "update"),
+            ],
+        ),
+    ]
+
+
+def test_normalize_sources_targets_object_needs_target_key():
+    with pytest.raises(BackupError, match="non-empty 'target'"):
+        normalize_sources(
+            [{"path": "/a", "targets": [{"mode": "copy"}]}],
+            "update",
+            GT,
+        )
+
+
+def test_normalize_sources_targets_entry_mode_invalid():
+    with pytest.raises(BackupError, match="targets\\[\\]\\.mode"):
+        normalize_sources(
+            [{"path": "/a", "targets": [{"target": "/x", "mode": "bad"}]}],
+            "update",
+            GT,
+        )
 
 
 def test_normalize_sources_targets_precedence_over_target():
     raw = [{"path": "/a", "target": "/alone", "targets": ["/x", "/y"]}]
     assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", "update", ["/x", "/y"]),
+        ("/a", "a", [("/x", "update"), ("/y", "update")]),
     ]
 
 
@@ -100,6 +143,11 @@ def test_normalize_sources_invalid_type():
 def test_normalize_sources_bad_entry():
     with pytest.raises(BackupError, match="sources entries"):
         normalize_sources([123], "update", GT)
+
+
+def test_normalize_sources_targets_non_string_non_dict():
+    with pytest.raises(BackupError, match="targets entries must be"):
+        normalize_sources([{"path": "/a", "targets": [1]}], "update", GT)
 
 
 def test_default_mode_from_config_prefers_default_mode():
@@ -279,6 +327,46 @@ def test_run_from_config_two_targets_update(tmp_path: Path):
     assert (d1 / "one" / "f").read_text() == "x"
     assert (d2 / "one" / "f").read_text() == "x"
     assert (flag_base / ".synced").is_file()
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_targets_per_entry_mode(tmp_path: Path):
+    src = tmp_path / "src" / "data"
+    src.mkdir(parents=True)
+    (src / "file.txt").write_text("z", encoding="utf-8")
+    d_upd = tmp_path / "mirror"
+    d_copy = tmp_path / "snap"
+    d_tgz = tmp_path / "archives"
+    flag_base = tmp_path / "flagbase"
+    flag_base.mkdir(parents=True)
+    log_f = tmp_path / "per-target-mode.log"
+    cfg = {
+        "target": str(flag_base),
+        "default_mode": "update",
+        "sources": [
+            {
+                "path": str(src),
+                "name": "data",
+                "mode": "update",
+                "targets": [
+                    str(d_upd),
+                    {"target": str(d_copy), "mode": "copy"},
+                    {"target": str(d_tgz), "mode": "tgz"},
+                ],
+            }
+        ],
+        "success_flag": ".ok",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    assert (d_upd / "data" / "file.txt").read_text() == "z"
+    copies = [p for p in d_copy.iterdir() if p.is_dir() and p.name.startswith("data-")]
+    assert len(copies) == 1
+    assert (copies[0] / "file.txt").read_text() == "z"
+    tgzs = list(d_tgz.glob("data-*.tgz"))
+    assert len(tgzs) == 1
+    assert (flag_base / ".ok").is_file()
 
 
 @pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")

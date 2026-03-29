@@ -44,43 +44,59 @@ def default_mode_from_config(cfg: dict[str, Any]) -> str:
     return _validate_mode("default_mode", raw)
 
 
-def _targets_for_source_entry(item: dict[str, Any], global_target: str) -> list[str]:
+def _targets_for_source_entry(
+    item: dict[str, Any],
+    global_target: str,
+    source_mode: str,
+) -> list[tuple[str, str]]:
+    """Список пар (цель, mode) для одного источника. source_mode — режим по умолчанию для строковых целей."""
     ts = item.get("targets")
     if ts is not None:
         if not isinstance(ts, list) or not ts:
-            raise BackupError("targets must be a non-empty list of strings")
-        out: list[str] = []
+            raise BackupError("targets must be a non-empty list")
+        out: list[tuple[str, str]] = []
         for x in ts:
-            if not isinstance(x, str) or not x.strip():
-                raise BackupError("each targets entry must be a non-empty string")
-            out.append(x.strip())
+            if isinstance(x, str):
+                if not x.strip():
+                    raise BackupError("each string in targets must be non-empty")
+                out.append((x.strip(), source_mode))
+            elif isinstance(x, dict):
+                dest = x.get("target")
+                if not dest or not isinstance(dest, str) or not dest.strip():
+                    raise BackupError("each targets[] object needs non-empty 'target'")
+                m = x.get("mode", source_mode)
+                if not isinstance(m, str):
+                    raise BackupError("targets[].mode must be a string")
+                out.append((dest.strip(), _validate_mode("targets[].mode", m)))
+            else:
+                raise BackupError("targets entries must be strings or objects with 'target'")
         return out
     one = item.get("target")
     if one is not None:
         if not isinstance(one, str) or not one.strip():
             raise BackupError("target must be a non-empty string")
-        return [one.strip()]
-    return [global_target]
+        return [(one.strip(), source_mode)]
+    return [(global_target, source_mode)]
 
 
 def normalize_sources(
     raw: Any,
     default_mode: str,
     global_target: str,
-) -> list[tuple[str, str, str, list[str]]]:
-    """Возвращает список (path, name, mode, targets) для каждого источника."""
+) -> list[tuple[str, str, list[tuple[str, str]]]]:
+    """Возвращает список (path, name, [(destination, mode), ...]) для каждого источника."""
     _validate_mode("default_mode", default_mode)
     if not isinstance(global_target, str) or not global_target.strip():
         raise BackupError("global target must be a non-empty string")
     gt = global_target.strip()
-    out: list[tuple[str, str, str, list[str]]] = []
+    out: list[tuple[str, str, list[tuple[str, str]]]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
     for item in raw:
         if isinstance(item, str):
             p = item
             name = Path(p).name
-            out.append((p, name, default_mode, [gt]))
+            out.append((p, name, [(gt, default_mode)]))
         elif isinstance(item, dict):
             p = item.get("path")
             if not p:
@@ -89,8 +105,9 @@ def normalize_sources(
             m = item.get("mode", default_mode)
             if not isinstance(m, str):
                 raise BackupError("source mode must be a string")
-            tgs = _targets_for_source_entry(item, gt)
-            out.append((str(p), str(name), _validate_mode("source mode", m), tgs))
+            sm = _validate_mode("source mode", m)
+            jobs = _targets_for_source_entry(item, gt, sm)
+            out.append((str(p), str(name), jobs))
         else:
             raise BackupError("sources entries must be strings or objects with path")
     return out
@@ -353,9 +370,9 @@ def run_from_config(cfg: dict[str, Any]) -> None:
         len(sources),
     )
 
-    for src, name, mode, tgts in sources:
+    for src, name, jobs in sources:
         batch = [(src, name)]
-        for tgt in tgts:
+        for tgt, mode in jobs:
             LOG.info("source %s name=%s mode=%s -> target %s", src, name, mode, tgt)
             if mode == "update":
                 mode_update(batch, tgt, sync_delete, rsync_extra)

@@ -12,12 +12,14 @@ default_mode: update
 sources:
   - path: /home/you/projects/app
     name: app
-  # Один источник — в удалённый каталог и на локальную флэшку (один и тот же mode):
+  # Несколько целей; у объекта в targets можно задать свой mode:
   # - path: /home/you/photos
   #   name: photos
+  #   mode: update
   #   targets:
   #     - backup@nas.example.org:/var/backups/photos
-  #     - /media/usb/photos-mirror
+  #     - target: /media/usb/photos-mirror
+  #       mode: copy
 
 success_flag: .backup-success
 

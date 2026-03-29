@@ -3,7 +3,7 @@
 # Удалённый сервер (user@host:/path, rsync по SSH): см. config.remote.example.yaml
 
 # Цель по умолчанию: локальный путь или rsync-цель (user@host:/path).
-# У источника можно задать свой target или список targets (несколько копий с тем же mode).
+# У источника: target или targets; в targets у каждой цели может быть свой mode (см. закомментированные примеры).
 target: /media/usb/backup
 
 # Режим по умолчанию для источников без своего mode (устаревший ключ mode тоже принимается).
@@ -17,10 +17,15 @@ sources:
   - /home/user/projects/myapp
   - path: /home/user/documents
     name: docs
+  # Несколько целей: строки (режим = mode источника) и объекты { target, mode? }
   # - path: /home/user/photos
+  #   mode: update
   #   targets:
   #     - /media/usb/photos
-  #     - user@nas:/backups/photos
+  #     - target: user@nas:/backups/photos
+  #       mode: update
+  #     - target: /media/usb/photos-tgz-drop
+  #       mode: tgz
   # - path: /home/user/snapshot-me
   #   mode: copy
   #   target: /media/usb/snapshots
