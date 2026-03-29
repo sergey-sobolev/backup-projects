@@ -21,6 +21,10 @@ sources:
 # флаг создаётся через rsync на удалённой стороне в тот же каталог, что и target.
 success_flag: .backup-success
 
+# Журнал: путь к файлу; true — каталог по XDG; false — только stderr; если ключ убрать —
+# используется ~/.local/state/backup-projects/backup.log (или $XDG_STATE_HOME/...).
+# log_file: /var/log/backup-projects.log
+
 # Для mode: update — удалять на приёмнике файлы, которых нет в источнике (как зеркало)
 sync_delete: false
 
