@@ -44,17 +44,43 @@ def default_mode_from_config(cfg: dict[str, Any]) -> str:
     return _validate_mode("default_mode", raw)
 
 
-def normalize_sources(raw: Any, default_mode: str) -> list[tuple[str, str, str]]:
-    """Возвращает список (path, name, mode) для каждого источника."""
+def _targets_for_source_entry(item: dict[str, Any], global_target: str) -> list[str]:
+    ts = item.get("targets")
+    if ts is not None:
+        if not isinstance(ts, list) or not ts:
+            raise BackupError("targets must be a non-empty list of strings")
+        out: list[str] = []
+        for x in ts:
+            if not isinstance(x, str) or not x.strip():
+                raise BackupError("each targets entry must be a non-empty string")
+            out.append(x.strip())
+        return out
+    one = item.get("target")
+    if one is not None:
+        if not isinstance(one, str) or not one.strip():
+            raise BackupError("target must be a non-empty string")
+        return [one.strip()]
+    return [global_target]
+
+
+def normalize_sources(
+    raw: Any,
+    default_mode: str,
+    global_target: str,
+) -> list[tuple[str, str, str, list[str]]]:
+    """Возвращает список (path, name, mode, targets) для каждого источника."""
     _validate_mode("default_mode", default_mode)
-    out: list[tuple[str, str, str]] = []
+    if not isinstance(global_target, str) or not global_target.strip():
+        raise BackupError("global target must be a non-empty string")
+    gt = global_target.strip()
+    out: list[tuple[str, str, str, list[str]]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
     for item in raw:
         if isinstance(item, str):
             p = item
             name = Path(p).name
-            out.append((p, name, default_mode))
+            out.append((p, name, default_mode, [gt]))
         elif isinstance(item, dict):
             p = item.get("path")
             if not p:
@@ -63,7 +89,8 @@ def normalize_sources(raw: Any, default_mode: str) -> list[tuple[str, str, str]]
             m = item.get("mode", default_mode)
             if not isinstance(m, str):
                 raise BackupError("source mode must be a string")
-            out.append((str(p), str(name), _validate_mode("source mode", m)))
+            tgs = _targets_for_source_entry(item, gt)
+            out.append((str(p), str(name), _validate_mode("source mode", m), tgs))
         else:
             raise BackupError("sources entries must be strings or objects with path")
     return out
@@ -287,9 +314,10 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     target = cfg.get("target")
     if not target or not isinstance(target, str):
         raise BackupError("target must be a non-empty string")
+    target = target.strip()
 
     dm = default_mode_from_config(cfg)
-    sources = normalize_sources(cfg.get("sources"), dm)
+    sources = normalize_sources(cfg.get("sources"), dm, target)
     if not sources:
         raise BackupError("sources must be a non-empty list")
 
@@ -297,20 +325,22 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     sync_delete = bool(cfg.get("sync_delete", False))
 
     LOG.info(
-        "starting backup: default_mode=%s target=%s sources=%d",
+        "starting backup: default_mode=%s default_target=%s source_entries=%d",
         dm,
         target,
         len(sources),
     )
 
-    for src, name, mode in sources:
+    for src, name, mode, tgts in sources:
         batch = [(src, name)]
-        if mode == "update":
-            mode_update(batch, target, sync_delete, rsync_extra)
-        elif mode == "copy":
-            mode_copy(batch, target, rsync_extra)
-        else:
-            mode_tgz(batch, target, rsync_extra)
+        for tgt in tgts:
+            LOG.info("source %s name=%s mode=%s -> target %s", src, name, mode, tgt)
+            if mode == "update":
+                mode_update(batch, tgt, sync_delete, rsync_extra)
+            elif mode == "copy":
+                mode_copy(batch, tgt, rsync_extra)
+            else:
+                mode_tgz(batch, tgt, rsync_extra)
 
     place_success_flag(cfg, target)
     LOG.info("backup finished successfully")

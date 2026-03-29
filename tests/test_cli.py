@@ -17,20 +17,22 @@ from backup_projects.cli import (
     run_from_config,
 )
 
+GT = "/default/backup"
+
 
 def test_normalize_sources_strings():
     raw = ["/a/b/foo", "/c/d"]
-    assert normalize_sources(raw, "update") == [
-        ("/a/b/foo", "foo", "update"),
-        ("/c/d", "d", "update"),
+    assert normalize_sources(raw, "update", GT) == [
+        ("/a/b/foo", "foo", "update", [GT]),
+        ("/c/d", "d", "update", [GT]),
     ]
 
 
 def test_normalize_sources_objects():
     raw = [{"path": "/x/y", "name": "custom"}, {"path": "/z"}]
-    assert normalize_sources(raw, "copy") == [
-        ("/x/y", "custom", "copy"),
-        ("/z", "z", "copy"),
+    assert normalize_sources(raw, "copy", GT) == [
+        ("/x/y", "custom", "copy", [GT]),
+        ("/z", "z", "copy", [GT]),
     ]
 
 
@@ -40,31 +42,62 @@ def test_normalize_sources_per_source_mode():
         "/b",
         {"path": "/c", "name": "see", "mode": "copy"},
     ]
-    assert normalize_sources(raw, "update") == [
-        ("/a", "a", "tgz"),
-        ("/b", "b", "update"),
-        ("/c", "see", "copy"),
+    assert normalize_sources(raw, "update", GT) == [
+        ("/a", "a", "tgz", [GT]),
+        ("/b", "b", "update", [GT]),
+        ("/c", "see", "copy", [GT]),
     ]
+
+
+def test_normalize_sources_per_source_target():
+    raw = [{"path": "/a", "target": "/mnt/usb"}]
+    assert normalize_sources(raw, "update", GT) == [
+        ("/a", "a", "update", ["/mnt/usb"]),
+    ]
+
+
+def test_normalize_sources_targets_list():
+    raw = [{"path": "/a", "targets": ["/t1", "/t2"]}]
+    assert normalize_sources(raw, "update", GT) == [
+        ("/a", "a", "update", ["/t1", "/t2"]),
+    ]
+
+
+def test_normalize_sources_targets_precedence_over_target():
+    raw = [{"path": "/a", "target": "/alone", "targets": ["/x", "/y"]}]
+    assert normalize_sources(raw, "update", GT) == [
+        ("/a", "a", "update", ["/x", "/y"]),
+    ]
+
+
+def test_normalize_sources_empty_targets_rejected():
+    with pytest.raises(BackupError, match="targets must be a non-empty"):
+        normalize_sources([{"path": "/a", "targets": []}], "update", GT)
+
+
+def test_normalize_sources_invalid_global_target():
+    with pytest.raises(BackupError, match="global target"):
+        normalize_sources(["/a"], "update", "")
 
 
 def test_normalize_sources_invalid_default_mode():
     with pytest.raises(BackupError, match="default_mode"):
-        normalize_sources(["/a"], "nope")
+        normalize_sources(["/a"], "nope", GT)
 
 
 def test_normalize_sources_invalid_source_mode():
     with pytest.raises(BackupError, match="source mode"):
-        normalize_sources([{"path": "/a", "mode": "bad"}], "update")
+        normalize_sources([{"path": "/a", "mode": "bad"}], "update", GT)
 
 
 def test_normalize_sources_invalid_type():
     with pytest.raises(BackupError, match="sources must be a list"):
-        normalize_sources("not-a-list", "update")
+        normalize_sources("not-a-list", "update", GT)
 
 
 def test_normalize_sources_bad_entry():
     with pytest.raises(BackupError, match="sources entries"):
-        normalize_sources([123], "update")
+        normalize_sources([123], "update", GT)
 
 
 def test_default_mode_from_config_prefers_default_mode():
@@ -186,6 +219,30 @@ def test_run_from_config_mixed_modes(tmp_path: Path):
     tgzs = list((dst).glob("arch-*.tgz"))
     assert len(tgzs) == 1
     assert (dst / ".done").is_file()
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_two_targets_update(tmp_path: Path):
+    src = tmp_path / "src" / "one"
+    src.mkdir(parents=True)
+    (src / "f").write_text("x", encoding="utf-8")
+    d1 = tmp_path / "d1"
+    d2 = tmp_path / "d2"
+    flag_base = tmp_path / "flagbase"
+    flag_base.mkdir(parents=True)
+    log_f = tmp_path / "two.log"
+    cfg = {
+        "target": str(flag_base),
+        "default_mode": "update",
+        "sources": [{"path": str(src), "name": "one", "targets": [str(d1), str(d2)]}],
+        "success_flag": ".synced",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    assert (d1 / "one" / "f").read_text() == "x"
+    assert (d2 / "one" / "f").read_text() == "x"
+    assert (flag_base / ".synced").is_file()
 
 
 @pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")

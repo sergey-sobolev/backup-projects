@@ -1,7 +1,8 @@
 # Пример конфигурации резервного копирования.
 # Скопируйте в backup-config.yaml и отредактируйте.
 
-# Куда копировать: локальный путь или rsync-цель (user@host:/path)
+# Цель по умолчанию: локальный путь или rsync-цель (user@host:/path).
+# У источника можно задать свой target или список targets (несколько копий с тем же mode).
 target: /media/usb/backup
 
 # Режим по умолчанию для источников без своего mode (устаревший ключ mode тоже принимается).
@@ -10,17 +11,21 @@ target: /media/usb/backup
 #   tgz    — архив .tgz, затем перенос архива(ов) через rsync
 default_mode: update
 
-# Список каталогов-источников (строка или объект с path, необязательными name и mode)
+# Список каталогов-источников (строка или объект с path; опционально name, mode, target или targets)
 sources:
   - /home/user/projects/myapp
   - path: /home/user/documents
     name: docs
+  # - path: /home/user/photos
+  #   targets:
+  #     - /media/usb/photos
+  #     - user@nas:/backups/photos
   # - path: /home/user/snapshot-me
   #   mode: copy
+  #   target: /media/usb/snapshots
 
-# Файл-флаг успеха (создаётся только после успешного завершения всех операций).
-# Относительные пути считаются относительно target (локально); для удалённого target
-# флаг создаётся через rsync на удалённой стороне в тот же каталог, что и target.
+# Файл-флаг успеха (после всех операций). Путь относительно корневого target (не per-source).
+# Для удалённого корневого target флаг передаётся туда же через rsync.
 success_flag: .backup-success
 
 # Имя файла журнала в каталоге состояния ($XDG_STATE_HOME/backup-projects/ или
