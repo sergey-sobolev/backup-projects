@@ -13,6 +13,7 @@ from backup_projects.cli import (
     configure_logging,
     default_mode_from_config,
     load_config,
+    max_workers_from_config,
     merge_tgz_rotate,
     normalize_sources,
     parse_rsync_extra,
@@ -185,6 +186,24 @@ def test_run_from_config_all_sources_disabled_raises(tmp_path: Path):
 def test_normalize_sources_targets_non_string_non_dict():
     with pytest.raises(BackupError, match="targets entries must be"):
         normalize_sources([{"path": "/a", "targets": [1]}], "update", GT, CFG0)
+
+
+def test_max_workers_from_config_defaults():
+    assert max_workers_from_config({}, 0) == 1
+    assert max_workers_from_config({}, 3) == 3
+    assert max_workers_from_config({}, 20) == 8
+
+
+def test_max_workers_from_config_explicit():
+    assert max_workers_from_config({"max_workers": 3}, 10) == 3
+    assert max_workers_from_config({"max_workers": 100}, 4) == 4
+
+
+def test_max_workers_from_config_invalid():
+    with pytest.raises(BackupError, match="max_workers"):
+        max_workers_from_config({"max_workers": 0}, 5)
+    with pytest.raises(BackupError, match="max_workers"):
+        max_workers_from_config({"max_workers": True}, 5)
 
 
 def test_merge_tgz_rotate_global():

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -396,6 +397,53 @@ def _default_state_log_path(cfg: dict[str, Any]) -> Path:
     return _state_log_dir() / name
 
 
+def max_workers_from_config(cfg: dict[str, Any], num_tasks: int) -> int:
+    if num_tasks < 1:
+        return 1
+    raw = cfg.get("max_workers")
+    if raw is None:
+        return min(8, num_tasks)
+    if type(raw) is not int or raw < 1:
+        raise BackupError("max_workers must be a positive integer")
+    return min(raw, num_tasks)
+
+
+def _run_backup_job(
+    src: str,
+    name: str,
+    tgt: str,
+    mode: str,
+    rot: bool,
+    mc: int | None,
+    sync_delete: bool,
+    rsync_extra: list[str],
+    tgz_dt_suffix: bool,
+) -> None:
+    batch = [(src, name)]
+    LOG.info(
+        "job: source %s name=%s mode=%s -> target %s rotate=%s max_count=%s",
+        src,
+        name,
+        mode,
+        tgt,
+        rot,
+        mc,
+    )
+    if mode == "update":
+        mode_update(batch, tgt, sync_delete, rsync_extra)
+    elif mode == "copy":
+        mode_copy(batch, tgt, rsync_extra)
+    else:
+        mode_tgz(
+            batch,
+            tgt,
+            rsync_extra,
+            underscore_datetime_suffix=tgz_dt_suffix,
+            rotate=rot,
+            max_count=mc,
+        )
+
+
 def configure_logging(
     log_file: Path | None,
     *,
@@ -439,38 +487,39 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     sync_delete = bool(cfg.get("sync_delete", False))
     tgz_dt_suffix = tgz_datetime_suffix_enabled(cfg)
 
+    tasks: list[tuple[str, str, str, str, bool, int | None]] = []
+    for src, name, jobs in sources:
+        for tgt, mode, rot, mc in jobs:
+            tasks.append((src, name, tgt, mode, rot, mc))
+
+    workers = max_workers_from_config(cfg, len(tasks))
     LOG.info(
-        "starting backup: default_mode=%s default_target=%s source_entries=%d",
+        "starting backup: default_mode=%s default_target=%s source_entries=%d jobs=%d max_workers=%d",
         dm,
         target,
         len(sources),
+        len(tasks),
+        workers,
     )
 
-    for src, name, jobs in sources:
-        batch = [(src, name)]
-        for tgt, mode, rot, mc in jobs:
-            LOG.info(
-                "source %s name=%s mode=%s -> target %s rotate=%s max_count=%s",
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                _run_backup_job,
                 src,
                 name,
-                mode,
                 tgt,
+                mode,
                 rot,
                 mc,
+                sync_delete,
+                rsync_extra,
+                tgz_dt_suffix,
             )
-            if mode == "update":
-                mode_update(batch, tgt, sync_delete, rsync_extra)
-            elif mode == "copy":
-                mode_copy(batch, tgt, rsync_extra)
-            else:
-                mode_tgz(
-                    batch,
-                    tgt,
-                    rsync_extra,
-                    underscore_datetime_suffix=tgz_dt_suffix,
-                    rotate=rot,
-                    max_count=mc,
-                )
+            for src, name, tgt, mode, rot, mc in tasks
+        ]
+        for fut in futures:
+            fut.result()
 
     place_success_flag(cfg, target)
     LOG.info("backup finished successfully")
