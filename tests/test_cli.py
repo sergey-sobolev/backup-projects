@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from backup_projects.cli import (
     parse_rsync_extra,
     resolve_log_path,
     run_from_config,
+    tgz_datetime_suffix_enabled,
 )
 
 GT = "/default/backup"
@@ -123,6 +125,16 @@ def test_parse_rsync_extra_invalid():
         parse_rsync_extra({"rsync_extra": 1})
 
 
+def test_tgz_datetime_suffix_enabled():
+    assert tgz_datetime_suffix_enabled({}) is False
+    assert tgz_datetime_suffix_enabled({"tgz_datetime_suffix": True}) is True
+
+
+def test_tgz_datetime_suffix_invalid_type():
+    with pytest.raises(BackupError, match="tgz_datetime_suffix"):
+        tgz_datetime_suffix_enabled({"tgz_datetime_suffix": "yes"})
+
+
 def test_load_config_roundtrip(tmp_path: Path):
     p = tmp_path / "c.yaml"
     data = {
@@ -218,6 +230,30 @@ def test_run_from_config_mixed_modes(tmp_path: Path):
     assert (dst / "inc" / "a").read_text() == "1"
     tgzs = list((dst).glob("arch-*.tgz"))
     assert len(tgzs) == 1
+    assert re.fullmatch(r"arch-\d{8}_\d{6}\.tgz", tgzs[0].name)
+    assert (dst / ".done").is_file()
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_tgz_datetime_suffix(tmp_path: Path):
+    t = tmp_path / "t" / "q"
+    t.mkdir(parents=True)
+    (t / "b").write_text("2", encoding="utf-8")
+    dst = tmp_path / "out"
+    log_f = tmp_path / "tgzfmt.log"
+    cfg = {
+        "target": str(dst),
+        "default_mode": "tgz",
+        "tgz_datetime_suffix": True,
+        "sources": [{"path": str(t), "name": "arch"}],
+        "success_flag": ".done",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    names = [p.name for p in dst.glob("*.tgz")]
+    assert len(names) == 1
+    assert re.fullmatch(r"arch_\d{14}\.tgz", names[0])
     assert (dst / ".done").is_file()
 
 

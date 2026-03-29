@@ -28,3 +28,6 @@ log_filename: backup.log
 
 # Зеркалирование (осторожно: удаляет на сервере лишнее относительно источника)
 # sync_delete: false
+
+# Для mode: tgz — имя архива с суффиксом _YYYYMMDDHHMMSS (см. README)
+# tgz_datetime_suffix: true

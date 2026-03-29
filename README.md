@@ -63,7 +63,7 @@ pip install -e ".[dev]"
    - `success_flag` — относительный путь файла-флага от **корневого** `target` (общий флаг после всех копий, не привязан к per-source целям)
    - `log_filename` — имя файла журнала в каталоге состояния (`$XDG_STATE_HOME/backup-projects/` или `~/.local/state/backup-projects/`); по умолчанию `backup.log`
    - `log_file` — полный путь к журналу (перекрывает только имя из `log_filename`), либо `true` / `false` / отсутствие ключа — см. раздел «Журнал»
-   - опционально: `sync_delete`, `rsync_extra`
+   - опционально: `sync_delete`, `rsync_extra`, `tgz_datetime_suffix` — для режима `tgz`: при `true` к имени архива добавляется суффикс `_YYYYMMDDHHMMSS` (например `docs_20260329183045.tgz`); по умолчанию используется формат `name-YYYYmmdd_HHMMSS.tgz`
 
 ## Примеры использования
 

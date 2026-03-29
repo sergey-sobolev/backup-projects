@@ -40,5 +40,8 @@ log_filename: backup.log
 # Для mode: update — удалять на приёмнике файлы, которых нет в источнике (как зеркало)
 sync_delete: false
 
+# Для mode: tgz — если true, имя архива: <name>_YYYYMMDDHHMMSS.tgz вместо <name>-YYYYmmdd_HHMMSS.tgz
+# tgz_datetime_suffix: true
+
 # rsync: дополнительные аргументы (строка или список)
 # rsync_extra: ["--exclude", ".git"]

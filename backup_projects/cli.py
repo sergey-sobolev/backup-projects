@@ -102,6 +102,15 @@ def _rsync_base() -> list[str]:
     return ["rsync", "-aH"]
 
 
+def tgz_datetime_suffix_enabled(cfg: dict[str, Any]) -> bool:
+    raw = cfg.get("tgz_datetime_suffix")
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise BackupError("tgz_datetime_suffix must be a boolean")
+    return raw
+
+
 def parse_rsync_extra(cfg: dict[str, Any]) -> list[str]:
     extra = cfg.get("rsync_extra")
     if extra is None:
@@ -208,9 +217,21 @@ def mode_tgz(
     sources: list[tuple[str, str]],
     target: str,
     rsync_extra: list[str],
+    *,
+    underscore_datetime_suffix: bool = False,
 ) -> None:
     base = _rsync_base() + rsync_extra
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if underscore_datetime_suffix:
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        def archive_basename(n: str) -> str:
+            return f"{n}_{stamp}.tgz"
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        def archive_basename(n: str) -> str:
+            return f"{n}-{stamp}.tgz"
+
     tmpdir = tempfile.mkdtemp(prefix="backup-tgz-")
     LOG.debug("tgz temp dir: %s", tmpdir)
     try:
@@ -219,7 +240,7 @@ def mode_tgz(
             src_path = Path(src).expanduser()
             if not src_path.is_dir():
                 raise BackupError(f"source is not a directory: {src_path}")
-            arc = Path(tmpdir) / f"{name}-{stamp}.tgz"
+            arc = Path(tmpdir) / archive_basename(name)
             tar_cmd = ["tar", "-czf", str(arc), "-C", str(src_path.parent), src_path.name]
             LOG.debug("run: %s", " ".join(tar_cmd))
             r = subprocess.run(tar_cmd, check=False)
@@ -323,6 +344,7 @@ def run_from_config(cfg: dict[str, Any]) -> None:
 
     rsync_extra = parse_rsync_extra(cfg)
     sync_delete = bool(cfg.get("sync_delete", False))
+    tgz_dt_suffix = tgz_datetime_suffix_enabled(cfg)
 
     LOG.info(
         "starting backup: default_mode=%s default_target=%s source_entries=%d",
@@ -340,7 +362,7 @@ def run_from_config(cfg: dict[str, Any]) -> None:
             elif mode == "copy":
                 mode_copy(batch, tgt, rsync_extra)
             else:
-                mode_tgz(batch, tgt, rsync_extra)
+                mode_tgz(batch, tgt, rsync_extra, underscore_datetime_suffix=tgz_dt_suffix)
 
     place_success_flag(cfg, target)
     LOG.info("backup finished successfully")
