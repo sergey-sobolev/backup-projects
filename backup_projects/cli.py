@@ -4,6 +4,7 @@ CLI: резервное копирование по YAML через rsync, с ж
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import re
@@ -74,6 +75,22 @@ def merge_tgz_rotate(
     return (False, None)
 
 
+def merge_keep_different_only(
+    cfg: dict[str, Any],
+    source_dict: dict[str, Any] | None,
+    target_dict: dict[str, Any] | None,
+) -> bool:
+    """keep_different_only: приоритет targets[] > источник > корень конфига."""
+    k: Any = cfg.get("keep_different_only", False)
+    if source_dict is not None and "keep_different_only" in source_dict:
+        k = source_dict["keep_different_only"]
+    if target_dict is not None and "keep_different_only" in target_dict:
+        k = target_dict["keep_different_only"]
+    if not isinstance(k, bool):
+        raise BackupError("keep_different_only must be a boolean")
+    return k
+
+
 def _targets_for_source_entry(
     item: dict[str, Any],
     global_target: str,
@@ -114,13 +131,13 @@ def normalize_sources(
     default_mode: str,
     global_target: str,
     cfg: dict[str, Any],
-) -> list[tuple[str, str, list[tuple[str, str, bool, int | None]]]]:
-    """(path, name, [(destination, mode, rotate, max_count_or_none), ...])."""
+) -> list[tuple[str, str, list[tuple[str, str, bool, int | None, bool]]]]:
+    """(path, name, [(destination, mode, rotate, max_count_or_none, keep_different_only), ...])."""
     _validate_mode("default_mode", default_mode)
     if not isinstance(global_target, str) or not global_target.strip():
         raise BackupError("global target must be a non-empty string")
     gt = global_target.strip()
-    out: list[tuple[str, str, list[tuple[str, str, bool, int | None]]]] = []
+    out: list[tuple[str, str, list[tuple[str, str, bool, int | None, bool]]]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
     for item in raw:
@@ -128,7 +145,8 @@ def normalize_sources(
             p = item
             name = Path(p).name
             rot, mc = merge_tgz_rotate(cfg, None, None)
-            out.append((p, name, [(gt, default_mode, rot, mc)]))
+            kdo = merge_keep_different_only(cfg, None, None)
+            out.append((p, name, [(gt, default_mode, rot, mc, kdo)]))
         elif isinstance(item, dict):
             if "enable" in item:
                 ev = item["enable"]
@@ -146,7 +164,13 @@ def normalize_sources(
             sm = _validate_mode("source mode", m)
             raw_jobs = _targets_for_source_entry(item, gt, sm)
             jobs = [
-                (d, md, *merge_tgz_rotate(cfg, item, td)) for d, md, td in raw_jobs
+                (
+                    d,
+                    md,
+                    *merge_tgz_rotate(cfg, item, td),
+                    merge_keep_different_only(cfg, item, td),
+                )
+                for d, md, td in raw_jobs
             ]
             out.append((str(p), str(name), jobs))
         else:
@@ -297,6 +321,28 @@ def prune_tgz_archives(root: Path, name: str, max_count: int) -> None:
         p.unlink()
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def prune_tgz_duplicate_hashes(root: Path, name: str, new_archive: Path) -> None:
+    """Удаляет другие архивы того же логического имени с тем же SHA-256, что у new_archive."""
+    new_path = new_archive.resolve()
+    if not new_path.is_file():
+        return
+    new_hash = _file_sha256(new_path)
+    for p in _tgz_backups_for_name(root, name):
+        if p.resolve() == new_path:
+            continue
+        if _file_sha256(p) == new_hash:
+            LOG.info("keep_different_only: removing same-hash archive %s", p)
+            p.unlink()
+
+
 def mode_tgz(
     sources: list[tuple[str, str]],
     target: str,
@@ -305,6 +351,7 @@ def mode_tgz(
     underscore_datetime_suffix: bool = False,
     rotate: bool = False,
     max_count: int | None = None,
+    keep_different_only: bool = False,
 ) -> None:
     base = _rsync_base() + rsync_extra
     if underscore_datetime_suffix:
@@ -325,10 +372,13 @@ def mode_tgz(
         names: list[str] = []
         for src, name in sources:
             src_path = Path(src).expanduser()
-            if not src_path.is_dir():
+            if not src_path.exists():
+                raise BackupError(f"source does not exist: {src_path}")
+            real_dir = src_path.resolve()
+            if not real_dir.is_dir():
                 raise BackupError(f"source is not a directory: {src_path}")
             arc = Path(tmpdir) / archive_basename(name)
-            tar_cmd = ["tar", "-czf", str(arc), "-C", str(src_path.parent), src_path.name]
+            tar_cmd = ["tar", "-czf", str(arc), "-C", str(real_dir.parent), real_dir.name]
             LOG.debug("run: %s", shlex.join(tar_cmd))
             r = subprocess.run(tar_cmd, check=False)
             if r.returncode != 0:
@@ -342,6 +392,11 @@ def mode_tgz(
                     "rotate/max_count ignored for remote target %s (local prune only)",
                     target,
                 )
+            if keep_different_only:
+                LOG.warning(
+                    "keep_different_only ignored for remote target %s (local hash prune only)",
+                    target,
+                )
             for arc in archives:
                 cmd = base + [str(arc), target.rstrip("/") + "/"]
                 LOG.info("uploading archive -> %s", target)
@@ -349,10 +404,12 @@ def mode_tgz(
         else:
             root = _local_target_root(target)
             root.mkdir(parents=True, exist_ok=True)
-            for arc in archives:
+            for arc, aname in zip(archives, names):
                 cmd = base + [str(arc), str(root) + "/"]
                 LOG.info("rsync archive -> %s", root)
                 _run(cmd)
+                if keep_different_only:
+                    prune_tgz_duplicate_hashes(root, aname, root / arc.name)
             if rotate and max_count is not None:
                 for n in names:
                     prune_tgz_archives(root, n, max_count)
@@ -420,16 +477,18 @@ def _run_backup_job(
     sync_delete: bool,
     rsync_extra: list[str],
     tgz_dt_suffix: bool,
+    keep_different_only: bool,
 ) -> None:
     batch = [(src, name)]
     LOG.info(
-        "job: source %s name=%s mode=%s -> target %s rotate=%s max_count=%s",
+        "job: source %s name=%s mode=%s -> target %s rotate=%s max_count=%s keep_different_only=%s",
         src,
         name,
         mode,
         tgt,
         rot,
         mc,
+        keep_different_only,
     )
     if mode == "update":
         mode_update(batch, tgt, sync_delete, rsync_extra)
@@ -443,6 +502,7 @@ def _run_backup_job(
             underscore_datetime_suffix=tgz_dt_suffix,
             rotate=rot,
             max_count=mc,
+            keep_different_only=keep_different_only,
         )
 
 
@@ -489,10 +549,10 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     sync_delete = bool(cfg.get("sync_delete", False))
     tgz_dt_suffix = tgz_datetime_suffix_enabled(cfg)
 
-    tasks: list[tuple[str, str, str, str, bool, int | None]] = []
+    tasks: list[tuple[str, str, str, str, bool, int | None, bool]] = []
     for src, name, jobs in sources:
-        for tgt, mode, rot, mc in jobs:
-            tasks.append((src, name, tgt, mode, rot, mc))
+        for tgt, mode, rot, mc, kdo in jobs:
+            tasks.append((src, name, tgt, mode, rot, mc, kdo))
 
     workers = max_workers_from_config(cfg, len(tasks))
     LOG.info(
@@ -517,8 +577,9 @@ def run_from_config(cfg: dict[str, Any]) -> None:
                 sync_delete,
                 rsync_extra,
                 tgz_dt_suffix,
+                kdo,
             )
-            for src, name, tgt, mode, rot, mc in tasks
+            for src, name, tgt, mode, rot, mc, kdo in tasks
         ]
         for fut in futures:
             fut.result()

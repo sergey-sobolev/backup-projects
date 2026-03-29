@@ -14,10 +14,12 @@ from backup_projects.cli import (
     default_mode_from_config,
     load_config,
     max_workers_from_config,
+    merge_keep_different_only,
     merge_tgz_rotate,
     normalize_sources,
     parse_rsync_extra,
     prune_tgz_archives,
+    prune_tgz_duplicate_hashes,
     resolve_log_path,
     run_from_config,
     tgz_datetime_suffix_enabled,
@@ -30,16 +32,16 @@ CFG0: dict = {}
 def test_normalize_sources_strings():
     raw = ["/a/b/foo", "/c/d"]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a/b/foo", "foo", [(GT, "update", False, None)]),
-        ("/c/d", "d", [(GT, "update", False, None)]),
+        ("/a/b/foo", "foo", [(GT, "update", False, None, False)]),
+        ("/c/d", "d", [(GT, "update", False, None, False)]),
     ]
 
 
 def test_normalize_sources_objects():
     raw = [{"path": "/x/y", "name": "custom"}, {"path": "/z"}]
     assert normalize_sources(raw, "copy", GT, CFG0) == [
-        ("/x/y", "custom", [(GT, "copy", False, None)]),
-        ("/z", "z", [(GT, "copy", False, None)]),
+        ("/x/y", "custom", [(GT, "copy", False, None, False)]),
+        ("/z", "z", [(GT, "copy", False, None, False)]),
     ]
 
 
@@ -50,23 +52,23 @@ def test_normalize_sources_per_source_mode():
         {"path": "/c", "name": "see", "mode": "copy"},
     ]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [(GT, "tgz", False, None)]),
-        ("/b", "b", [(GT, "update", False, None)]),
-        ("/c", "see", [(GT, "copy", False, None)]),
+        ("/a", "a", [(GT, "tgz", False, None, False)]),
+        ("/b", "b", [(GT, "update", False, None, False)]),
+        ("/c", "see", [(GT, "copy", False, None, False)]),
     ]
 
 
 def test_normalize_sources_per_source_target():
     raw = [{"path": "/a", "target": "/mnt/usb"}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/mnt/usb", "update", False, None)]),
+        ("/a", "a", [("/mnt/usb", "update", False, None, False)]),
     ]
 
 
 def test_normalize_sources_targets_list():
     raw = [{"path": "/a", "targets": ["/t1", "/t2"]}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/t1", "update", False, None), ("/t2", "update", False, None)]),
+        ("/a", "a", [("/t1", "update", False, None, False), ("/t2", "update", False, None, False)]),
     ]
 
 
@@ -87,9 +89,9 @@ def test_normalize_sources_targets_mixed_modes():
             "/a",
             "a",
             [
-                ("/inc", "update", False, None),
-                ("/snap", "copy", False, None),
-                ("/arc", "update", False, None),
+                ("/inc", "update", False, None, False),
+                ("/snap", "copy", False, None, False),
+                ("/arc", "update", False, None, False),
             ],
         ),
     ]
@@ -118,7 +120,7 @@ def test_normalize_sources_targets_entry_mode_invalid():
 def test_normalize_sources_targets_precedence_over_target():
     raw = [{"path": "/a", "target": "/alone", "targets": ["/x", "/y"]}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/x", "update", False, None), ("/y", "update", False, None)]),
+        ("/a", "a", [("/x", "update", False, None, False), ("/y", "update", False, None, False)]),
     ]
 
 
@@ -159,8 +161,8 @@ def test_normalize_sources_enable_false_skips():
         {"path": "/c", "enable": True},
     ]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/b", "b", [(GT, "update", False, None)]),
-        ("/c", "c", [(GT, "update", False, None)]),
+        ("/b", "b", [(GT, "update", False, None, False)]),
+        ("/c", "c", [(GT, "update", False, None, False)]),
     ]
 
 
@@ -234,10 +236,36 @@ def test_merge_tgz_rotate_invalid_bool():
         merge_tgz_rotate({"rotate": "yes", "max_count": 2}, None, None)
 
 
+def test_merge_keep_different_only_defaults_and_overrides():
+    assert merge_keep_different_only({}, None, None) is False
+    assert merge_keep_different_only({"keep_different_only": True}, None, None) is True
+    src = {"keep_different_only": False}
+    assert merge_keep_different_only({"keep_different_only": True}, src, None) is False
+    assert merge_keep_different_only({}, {"keep_different_only": True}, None) is True
+    tgt = {"keep_different_only": True}
+    assert merge_keep_different_only({}, {"keep_different_only": False}, tgt) is True
+
+
+def test_merge_keep_different_only_invalid():
+    with pytest.raises(BackupError, match="keep_different_only"):
+        merge_keep_different_only({"keep_different_only": "yes"}, None, None)
+
+
+def test_normalize_sources_keep_different_only():
+    raw = [{"path": "/a", "mode": "tgz", "keep_different_only": True}]
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [(GT, "tgz", False, None, True)]),
+    ]
+    cfg_g = {"keep_different_only": True}
+    assert normalize_sources(["/x"], "update", GT, cfg_g) == [
+        ("/x", "x", [(GT, "update", False, None, True)]),
+    ]
+
+
 def test_normalize_sources_rotate_on_source():
     raw = [{"path": "/a", "mode": "tgz", "rotate": True, "max_count": 4}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [(GT, "tgz", True, 4)]),
+        ("/a", "a", [(GT, "tgz", True, 4, False)]),
     ]
 
 
@@ -252,8 +280,30 @@ def test_normalize_sources_rotate_on_target_entry():
         }
     ]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/t1", "tgz", True, 2)]),
+        ("/a", "a", [("/t1", "tgz", True, 2, False)]),
     ]
+
+
+def test_prune_tgz_duplicate_hashes_removes_same_bytes(tmp_path: Path):
+    root = tmp_path
+    data = b"same-archive-bytes"
+    older = root / "app-20260101_120000.tgz"
+    newer = root / "app-20260102_130000.tgz"
+    older.write_bytes(data)
+    newer.write_bytes(data)
+    prune_tgz_duplicate_hashes(root, "app", newer)
+    assert not older.exists()
+    assert newer.is_file()
+
+
+def test_prune_tgz_duplicate_hashes_keeps_when_hash_differs(tmp_path: Path):
+    root = tmp_path
+    a = root / "app-20260101_120000.tgz"
+    b = root / "app-20260102_130000.tgz"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    prune_tgz_duplicate_hashes(root, "app", b)
+    assert a.is_file() and b.is_file()
 
 
 def test_prune_tgz_archives_keeps_newest(tmp_path: Path):
@@ -541,6 +591,40 @@ def test_run_from_config_tgz_rotate(tmp_path: Path):
     run_from_config(cfg)
     tgzs = sorted(dst.glob("box-*.tgz"))
     assert len(tgzs) == 3
+    assert (flag_base / ".ok").is_file()
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+@pytest.mark.skipif(not shutil.which("tar"), reason="tar not installed")
+def test_run_from_config_tgz_symlink_source_archives_target_dir(tmp_path: Path):
+    real = tmp_path / "real_data"
+    real.mkdir()
+    (real / "leaf.txt").write_text("inside-real", encoding="utf-8")
+    link = tmp_path / "via_link"
+    link.symlink_to(real, target_is_directory=True)
+    dst = tmp_path / "out"
+    log_f = tmp_path / "sym.log"
+    flag_base = tmp_path / "fb"
+    flag_base.mkdir()
+    cfg = {
+        "target": str(flag_base),
+        "default_mode": "tgz",
+        "sources": [{"path": str(link), "name": "pack", "target": str(dst)}],
+        "success_flag": ".ok",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    tgzs = list(dst.glob("pack-*.tgz"))
+    assert len(tgzs) == 1
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    subprocess.run(
+        ["tar", "-xzf", str(tgzs[0]), "-C", str(extracted)],
+        check=True,
+        capture_output=True,
+    )
+    assert (extracted / "real_data" / "leaf.txt").read_text() == "inside-real"
     assert (flag_base / ".ok").is_file()
 
 

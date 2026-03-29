@@ -56,6 +56,9 @@ sync_delete: false
 # rotate: true
 # max_count: 5
 
+# tgz, локальная цель: после нового архива удалить другие name-*.tgz / name_*.tgz с тем же SHA-256 (см. README)
+# keep_different_only: true
+
 # rsync: дополнительные аргументы (строка или список)
 # rsync_extra: ["--exclude", ".git"]
 
