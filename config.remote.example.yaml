@@ -1,0 +1,30 @@
+# Пример: резервное копирование на удалённый сервер через rsync по SSH.
+# Формат цели: user@host:/абсолютный/путь (как у scp). Rsync вызывает ssh(1) сам;
+# отдельные команды scp/sftp в скрипте не используются — тот же канал, что и у SFTP/SCP в OpenSSH.
+#
+# Перед запуском: ssh-ключ на сервер, проверка `ssh user@host`, каталог назначения с правами записи.
+
+# Корневая цель по умолчанию (удалённая). Флаг success_flag относится к этому пути на сервере.
+target: backup@nas.example.org:/var/backups/this-machine
+
+default_mode: update
+
+sources:
+  - path: /home/you/projects/app
+    name: app
+  # Один источник — в удалённый каталог и на локальную флэшку (один и тот же mode):
+  # - path: /home/you/photos
+  #   name: photos
+  #   targets:
+  #     - backup@nas.example.org:/var/backups/photos
+  #     - /media/usb/photos-mirror
+
+success_flag: .backup-success
+
+log_filename: backup.log
+
+# Нестандартный порт SSH или доп. опции:
+# rsync_extra: ["-e", "ssh -p 2222 -o BatchMode=yes -o IdentitiesOnly=yes"]
+
+# Зеркалирование (осторожно: удаляет на сервере лишнее относительно источника)
+# sync_delete: false

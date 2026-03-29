@@ -6,3 +6,4 @@ dist/
 build/
 .pytest_cache/
 backup-config.yaml
+spec.md
