@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -156,7 +157,8 @@ def normalize_sources(
 def _rsync_base() -> list[str]:
     if not shutil.which("rsync"):
         raise BackupError("rsync not found; install with your distro package manager")
-    return ["rsync", "-aH"]
+    # --protect-args: пути с пробелами и спецсимволами на удалённой стороне не разбивает remote shell
+    return ["rsync", "-aH", "--protect-args"]
 
 
 def tgz_datetime_suffix_enabled(cfg: dict[str, Any]) -> bool:
@@ -173,17 +175,17 @@ def parse_rsync_extra(cfg: dict[str, Any]) -> list[str]:
     if extra is None:
         return []
     if isinstance(extra, str):
-        return extra.split()
+        return shlex.split(extra, posix=True)
     if isinstance(extra, list) and all(isinstance(x, str) for x in extra):
         return list(extra)
     raise BackupError("rsync_extra must be a string or list of strings")
 
 
 def _run(cmd: list[str]) -> None:
-    LOG.debug("run: %s", " ".join(cmd))
+    LOG.debug("run: %s", shlex.join(cmd))
     r = subprocess.run(cmd, check=False)
     if r.returncode != 0:
-        raise BackupError(f"command failed ({r.returncode}): {' '.join(cmd)}")
+        raise BackupError(f"command failed ({r.returncode}): {shlex.join(cmd)}")
 
 
 def _is_remote(dest: str) -> bool:
@@ -327,10 +329,10 @@ def mode_tgz(
                 raise BackupError(f"source is not a directory: {src_path}")
             arc = Path(tmpdir) / archive_basename(name)
             tar_cmd = ["tar", "-czf", str(arc), "-C", str(src_path.parent), src_path.name]
-            LOG.debug("run: %s", " ".join(tar_cmd))
+            LOG.debug("run: %s", shlex.join(tar_cmd))
             r = subprocess.run(tar_cmd, check=False)
             if r.returncode != 0:
-                raise BackupError(f"tar failed ({r.returncode}): {' '.join(tar_cmd)}")
+                raise BackupError(f"tar failed ({r.returncode}): {shlex.join(tar_cmd)}")
             archives.append(arc)
             names.append(name)
             LOG.info("created archive: %s", arc)

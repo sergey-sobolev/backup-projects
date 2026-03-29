@@ -1,5 +1,6 @@
 # Пример конфигурации резервного копирования.
 # Скопируйте в backup-config.yaml и отредактируйте.
+# Пути с пробелами в YAML — в кавычках, например path: "/home/user/My Documents/proj"
 # Удалённый сервер (user@host:/path, rsync по SSH): см. config.remote.example.yaml
 
 # Цель по умолчанию: локальный путь или rsync-цель (user@host:/path).

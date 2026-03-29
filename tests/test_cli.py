@@ -292,6 +292,13 @@ def test_parse_rsync_extra():
     assert parse_rsync_extra({"rsync_extra": ["--exclude", ".cache"]}) == ["--exclude", ".cache"]
 
 
+def test_parse_rsync_extra_shlex_preserves_spaces_in_quotes():
+    assert parse_rsync_extra({"rsync_extra": '--exclude "/tmp/foo bar/x"'}) == [
+        "--exclude",
+        "/tmp/foo bar/x",
+    ]
+
+
 def test_parse_rsync_extra_invalid():
     with pytest.raises(BackupError, match="rsync_extra"):
         parse_rsync_extra({"rsync_extra": 1})
@@ -379,6 +386,28 @@ def test_run_from_config_skips_disabled_source(tmp_path: Path):
     run_from_config(cfg)
     assert (dst / "on" / "x").read_text() == "1"
     assert not (dst / "off").exists()
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_paths_with_spaces(tmp_path: Path):
+    src = tmp_path / "source dir" / "my project"
+    src.mkdir(parents=True)
+    (src / "f.txt").write_text("ok", encoding="utf-8")
+    dst = tmp_path / "backup root"
+    dst.mkdir(parents=True)
+    log_f = tmp_path / "sp.log"
+    flag = tmp_path / "flagbase"
+    flag.mkdir(parents=True)
+    cfg = {
+        "target": str(flag),
+        "default_mode": "update",
+        "sources": [{"path": str(src), "name": "my project", "target": str(dst)}],
+        "success_flag": ".ok",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    assert (dst / "my project" / "f.txt").read_text() == "ok"
 
 
 @pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
