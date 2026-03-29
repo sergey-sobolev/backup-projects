@@ -48,6 +48,9 @@ log_filename: backup.log
 # Для mode: update — удалять на приёмнике файлы, которых нет в источнике (как зеркало)
 sync_delete: false
 
+# После успешного бэкапа и флага — sync локальных путей назначения (USB и т.п.; см. README)
+# force_sync: true
+
 # Для mode: tgz — если true, имя архива: <name>_YYYYMMDDHHMMSS.tgz вместо <name>-YYYYmmdd_HHMMSS.tgz
 # tgz_datetime_suffix: true
 

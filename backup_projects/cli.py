@@ -16,7 +16,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 try:
     import yaml
@@ -194,6 +194,15 @@ def tgz_datetime_suffix_enabled(cfg: dict[str, Any]) -> bool:
     return raw
 
 
+def force_sync_enabled(cfg: dict[str, Any]) -> bool:
+    if "force_sync" not in cfg:
+        return False
+    raw = cfg["force_sync"]
+    if not isinstance(raw, bool):
+        raise BackupError("force_sync must be a boolean")
+    return raw
+
+
 def parse_rsync_extra(cfg: dict[str, Any]) -> list[str]:
     extra = cfg.get("rsync_extra")
     if extra is None:
@@ -220,6 +229,44 @@ def _local_target_root(target: str) -> Path:
     if _is_remote(target):
         raise BackupError("internal: local path expected")
     return Path(target).expanduser().resolve()
+
+
+def _local_backup_sync_roots(
+    tasks: list[tuple[str, str, str, str, bool, int | None, bool]],
+    root_target: str,
+) -> list[Path]:
+    """Уникальные локальные корни назначения (задачи + корневой target для флага)."""
+    roots: set[Path] = set()
+    for _, _, tgt, _, _, _, _ in tasks:
+        if not _is_remote(tgt):
+            roots.add(_local_target_root(tgt))
+    if not _is_remote(root_target):
+        roots.add(_local_target_root(root_target))
+    return sorted(roots, key=lambda p: str(p))
+
+
+def _sync_local_destination_paths(roots: Sequence[Path]) -> None:
+    """Сброс кэша записи на диск для указанных путей (GNU sync принимает файл/каталог)."""
+    if not roots:
+        return
+    if not shutil.which("sync"):
+        LOG.warning("force_sync: sync not in PATH, using os.sync()")
+        os.sync()
+        return
+    did_os_sync = False
+    for path in roots:
+        cmd = ["sync", str(path)]
+        LOG.info("force_sync: %s", shlex.join(cmd))
+        r = subprocess.run(cmd, check=False)
+        if r.returncode != 0:
+            LOG.warning(
+                "force_sync: sync failed (%s) for %s; using os.sync()",
+                r.returncode,
+                path,
+            )
+            if not did_os_sync:
+                os.sync()
+                did_os_sync = True
 
 
 def _write_success_flag_local(flag_path: Path) -> None:
@@ -548,6 +595,7 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     rsync_extra = parse_rsync_extra(cfg)
     sync_delete = bool(cfg.get("sync_delete", False))
     tgz_dt_suffix = tgz_datetime_suffix_enabled(cfg)
+    do_force_sync = force_sync_enabled(cfg)
 
     tasks: list[tuple[str, str, str, str, bool, int | None, bool]] = []
     for src, name, jobs in sources:
@@ -585,6 +633,10 @@ def run_from_config(cfg: dict[str, Any]) -> None:
             fut.result()
 
     place_success_flag(cfg, target)
+
+    if do_force_sync:
+        _sync_local_destination_paths(_local_backup_sync_roots(tasks, target))
+
     LOG.info("backup finished successfully")
 
 

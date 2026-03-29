@@ -10,8 +10,11 @@ import yaml
 
 from backup_projects.cli import (
     BackupError,
+    _local_backup_sync_roots,
+    _sync_local_destination_paths,
     configure_logging,
     default_mode_from_config,
+    force_sync_enabled,
     load_config,
     max_workers_from_config,
     merge_keep_different_only,
@@ -362,6 +365,71 @@ def test_tgz_datetime_suffix_enabled():
 def test_tgz_datetime_suffix_invalid_type():
     with pytest.raises(BackupError, match="tgz_datetime_suffix"):
         tgz_datetime_suffix_enabled({"tgz_datetime_suffix": "yes"})
+
+
+def test_force_sync_enabled():
+    assert force_sync_enabled({}) is False
+    assert force_sync_enabled({"force_sync": False}) is False
+    assert force_sync_enabled({"force_sync": True}) is True
+
+
+def test_force_sync_enabled_invalid_type():
+    with pytest.raises(BackupError, match="force_sync"):
+        force_sync_enabled({"force_sync": "yes"})
+
+
+def test_local_backup_sync_roots_local_tasks_and_flag_base():
+    tasks = [
+        ("/src", "n", "/mnt/usb/backup", "update", False, None, False),
+        ("/src2", "n2", "/other", "copy", False, None, False),
+    ]
+    roots = _local_backup_sync_roots(tasks, "/var/flag-base")
+    assert roots == sorted(
+        [
+            Path("/mnt/usb/backup").resolve(),
+            Path("/other").resolve(),
+            Path("/var/flag-base").resolve(),
+        ],
+        key=lambda p: str(p),
+    )
+
+
+def test_local_backup_sync_roots_skips_remote():
+    tasks = [("/a", "b", "user@host:/path", "update", False, None, False)]
+    assert _local_backup_sync_roots(tasks, "user@host:/root") == []
+
+
+def test_sync_local_destination_paths_noop_empty():
+    _sync_local_destination_paths([])
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_force_sync_passes_local_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorded: list[list[Path]] = []
+
+    def capture(roots: list) -> None:
+        recorded.append(list(roots))
+
+    monkeypatch.setattr("backup_projects.cli._sync_local_destination_paths", capture)
+    src = tmp_path / "src" / "proj"
+    src.mkdir(parents=True)
+    (src / "f.txt").write_text("x", encoding="utf-8")
+    dst = tmp_path / "usb" / "dst"
+    flag_base = tmp_path / "state"
+    flag_base.mkdir(parents=True)
+    cfg = {
+        "target": str(flag_base),
+        "default_mode": "update",
+        "sources": [{"path": str(src), "name": "proj", "target": str(dst)}],
+        "success_flag": ".ok",
+        "log_file": False,
+        "force_sync": True,
+    }
+    configure_logging(None, verbose=False)
+    run_from_config(cfg)
+    assert len(recorded) == 1
+    got = {p.resolve() for p in recorded[0]}
+    assert got == {dst.resolve(), flag_base.resolve()}
 
 
 def test_load_config_roundtrip(tmp_path: Path):
