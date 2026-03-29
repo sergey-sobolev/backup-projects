@@ -56,10 +56,11 @@ pip install -e ".[dev]"
 2. Отредактируйте `backup-config.yaml`:
 
    - `target` — путь назначения или `user@host:/path`
-   - `mode` — `update` | `copy` | `tgz`
-   - `sources` — список каталогов
+   - `default_mode` — `update` | `copy` | `tgz` для источников без своего `mode` (для совместимости читается и устаревший ключ `mode`, если `default_mode` не задан)
+   - `sources` — список каталогов: строка или объект с `path`, опционально `name` и **своим** `mode` (`update` / `copy` / `tgz`)
    - `success_flag` — относительный путь файла-флага (от корня `target` для локальной цели)
-   - `log_file` — путь к журналу, `true` (каталог по XDG), `false` (только stderr), или опустите ключ для журнала по умолчанию (`$XDG_STATE_HOME/backup-projects/backup.log` или `~/.local/state/backup-projects/backup.log`)
+   - `log_filename` — имя файла журнала в каталоге состояния (`$XDG_STATE_HOME/backup-projects/` или `~/.local/state/backup-projects/`); по умолчанию `backup.log`
+   - `log_file` — полный путь к журналу (перекрывает только имя из `log_filename`), либо `true` / `false` / отсутствие ключа — см. раздел «Журнал»
    - опционально: `sync_delete`, `rsync_extra`
 
 ## Примеры использования
@@ -104,7 +105,10 @@ python3 -m backup_projects -c backup-config.yaml
 
 - В файл пишутся сообщения уровня **DEBUG** (команды rsync/tar и шаги).
 - В **stderr** по умолчанию — **INFO** и выше; `-v` включает DEBUG; `-q` оставляет WARNING и ошибки.
-- Путь к файлу: ключ `log_file` в YAML, опция `-l` / `--log-file` (имеет приоритет над конфигом), либо каталог по умолчанию, если ключ `log_file` в конфиге не задан.
+- **Имя файла** в общем конфиге: `log_filename` (только basename, путь к каталогу фиксирован: `…/backup-projects/<log_filename>`).
+- **Полный путь** к журналу: строка в `log_file`; она имеет приоритет над `log_filename`.
+- `log_file: false` — не писать в файл (только stderr). `log_file: true` или отсутствие / `null` — файл в каталоге состояния с именем из `log_filename` (по умолчанию `backup.log`).
+- Опция **`-l` / `--log-file`** переопределяет и `log_file`, и `log_filename`.
 
 ## Тесты
 

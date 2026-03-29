@@ -4,25 +4,31 @@
 # Куда копировать: локальный путь или rsync-цель (user@host:/path)
 target: /media/usb/backup
 
-# Режим:
+# Режим по умолчанию для источников без своего mode (устаревший ключ mode тоже принимается).
 #   update — инкрементальное обновление каталога назначения (rsync)
 #   copy   — новая копия с меткой времени при каждом запуске
 #   tgz    — архив .tgz, затем перенос архива(ов) через rsync
-mode: update
+default_mode: update
 
-# Список каталогов-источников (строка или объект с path и необязательным name)
+# Список каталогов-источников (строка или объект с path, необязательными name и mode)
 sources:
   - /home/user/projects/myapp
   - path: /home/user/documents
     name: docs
+  # - path: /home/user/snapshot-me
+  #   mode: copy
 
 # Файл-флаг успеха (создаётся только после успешного завершения всех операций).
 # Относительные пути считаются относительно target (локально); для удалённого target
 # флаг создаётся через rsync на удалённой стороне в тот же каталог, что и target.
 success_flag: .backup-success
 
-# Журнал: путь к файлу; true — каталог по XDG; false — только stderr; если ключ убрать —
-# используется ~/.local/state/backup-projects/backup.log (или $XDG_STATE_HOME/...).
+# Имя файла журнала в каталоге состояния ($XDG_STATE_HOME/backup-projects/ или
+# ~/.local/state/backup-projects/), если log_file не задан как полный путь.
+log_filename: backup.log
+
+# Полный путь к журналу (имеет приоритет над log_filename). true — каталог по умолчанию + log_filename;
+# false — только stderr. Опция CLI -l переопределяет оба ключа.
 # log_file: /var/log/backup-projects.log
 
 # Для mode: update — удалять на приёмнике файлы, которых нет в источнике (как зеркало)

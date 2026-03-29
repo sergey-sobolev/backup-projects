@@ -22,26 +22,48 @@ except ImportError:
 
 LOG = logging.getLogger("backup_projects")
 
+VALID_MODES = ("update", "copy", "tgz")
+
 
 class BackupError(Exception):
     pass
 
 
-def _normalize_sources(raw: Any) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
+def _validate_mode(label: str, mode: str) -> str:
+    if mode not in VALID_MODES:
+        raise BackupError(f"{label} must be one of: {', '.join(VALID_MODES)}")
+    return mode
+
+
+def default_mode_from_config(cfg: dict[str, Any]) -> str:
+    raw = cfg.get("default_mode")
+    if raw is None:
+        raw = cfg.get("mode", "update")
+    if not isinstance(raw, str):
+        raise BackupError("default_mode (or legacy mode) must be a string")
+    return _validate_mode("default_mode", raw)
+
+
+def normalize_sources(raw: Any, default_mode: str) -> list[tuple[str, str, str]]:
+    """Возвращает список (path, name, mode) для каждого источника."""
+    _validate_mode("default_mode", default_mode)
+    out: list[tuple[str, str, str]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
     for item in raw:
         if isinstance(item, str):
             p = item
             name = Path(p).name
-            out.append((p, name))
+            out.append((p, name, default_mode))
         elif isinstance(item, dict):
             p = item.get("path")
             if not p:
                 raise BackupError("each source object needs 'path'")
             name = item.get("name") or Path(str(p)).name
-            out.append((str(p), str(name)))
+            m = item.get("mode", default_mode)
+            if not isinstance(m, str):
+                raise BackupError("source mode must be a string")
+            out.append((str(p), str(name), _validate_mode("source mode", m)))
         else:
             raise BackupError("sources entries must be strings or objects with path")
     return out
@@ -213,13 +235,24 @@ def load_config(path: Path) -> dict[str, Any]:
     return data
 
 
-def _default_state_log_path() -> Path:
+def _state_log_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME", "")
     if base:
-        p = Path(base) / "backup-projects" / "backup.log"
-    else:
-        p = Path.home() / ".local" / "state" / "backup-projects" / "backup.log"
-    return p
+        return Path(base) / "backup-projects"
+    return Path.home() / ".local" / "state" / "backup-projects"
+
+
+def _default_state_log_path(cfg: dict[str, Any]) -> Path:
+    raw_name = cfg.get("log_filename", "backup.log")
+    if raw_name is not None and not isinstance(raw_name, str):
+        raise BackupError("log_filename must be a string")
+    name = (raw_name or "backup.log").strip()
+    if not name:
+        raise BackupError("log_filename must be a non-empty filename")
+    name = Path(name).name
+    if not name:
+        raise BackupError("log_filename must be a non-empty filename")
+    return _state_log_dir() / name
 
 
 def configure_logging(
@@ -255,25 +288,29 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     if not target or not isinstance(target, str):
         raise BackupError("target must be a non-empty string")
 
-    mode = cfg.get("mode", "update")
-    if mode not in ("update", "copy", "tgz"):
-        raise BackupError("mode must be one of: update, copy, tgz")
-
-    sources = _normalize_sources(cfg.get("sources"))
+    dm = default_mode_from_config(cfg)
+    sources = normalize_sources(cfg.get("sources"), dm)
     if not sources:
         raise BackupError("sources must be a non-empty list")
 
     rsync_extra = parse_rsync_extra(cfg)
     sync_delete = bool(cfg.get("sync_delete", False))
 
-    LOG.info("starting backup: mode=%s target=%s sources=%d", mode, target, len(sources))
+    LOG.info(
+        "starting backup: default_mode=%s target=%s sources=%d",
+        dm,
+        target,
+        len(sources),
+    )
 
-    if mode == "update":
-        mode_update(sources, target, sync_delete, rsync_extra)
-    elif mode == "copy":
-        mode_copy(sources, target, rsync_extra)
-    else:
-        mode_tgz(sources, target, rsync_extra)
+    for src, name, mode in sources:
+        batch = [(src, name)]
+        if mode == "update":
+            mode_update(batch, target, sync_delete, rsync_extra)
+        elif mode == "copy":
+            mode_copy(batch, target, rsync_extra)
+        else:
+            mode_tgz(batch, target, rsync_extra)
 
     place_success_flag(cfg, target)
     LOG.info("backup finished successfully")
@@ -281,19 +318,20 @@ def run_from_config(cfg: dict[str, Any]) -> None:
 
 def resolve_log_path(cfg: dict[str, Any], cli_log: str | None) -> Path | None:
     if cli_log:
-        return Path(cli_log)
-    if "log_file" not in cfg:
-        return _default_state_log_path()
-    raw = cfg["log_file"]
-    if raw is None:
-        return _default_state_log_path()
-    if raw is False:
+        return Path(cli_log).expanduser()
+
+    if "log_file" in cfg and cfg["log_file"] is False:
         return None
-    if raw is True:
-        return _default_state_log_path()
+
+    raw = cfg.get("log_file")
+
     if isinstance(raw, str):
-        return Path(raw)
-    raise BackupError("log_file must be a string, true, or false")
+        return Path(raw).expanduser()
+
+    if raw is True or raw is None or "log_file" not in cfg:
+        return _default_state_log_path(cfg)
+
+    raise BackupError("log_file must be a string, true, false, or null")
 
 
 def main() -> None:
@@ -308,7 +346,7 @@ def main() -> None:
         "-l",
         "--log-file",
         default=None,
-        help="append detailed log to this file (overrides config log_file)",
+        help="append detailed log to this file (overrides log_file and log_filename)",
     )
     ap.add_argument(
         "-v",
