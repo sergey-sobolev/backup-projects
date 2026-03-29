@@ -48,5 +48,10 @@ sync_delete: false
 # Для mode: tgz — если true, имя архива: <name>_YYYYMMDDHHMMSS.tgz вместо <name>-YYYYmmdd_HHMMSS.tgz
 # tgz_datetime_suffix: true
 
+# Ротация .tgz на локальной цели (после бэкапа оставить не больше max_count новейших архивов с тем же name)
+# Можно задать в корне, у источника или у элемента targets: { target: ..., rotate: true, max_count: 5 }
+# rotate: true
+# max_count: 5
+
 # rsync: дополнительные аргументы (строка или список)
 # rsync_extra: ["--exclude", ".git"]

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,22 +45,49 @@ def default_mode_from_config(cfg: dict[str, Any]) -> str:
     return _validate_mode("default_mode", raw)
 
 
+def merge_tgz_rotate(
+    cfg: dict[str, Any],
+    source_dict: dict[str, Any] | None,
+    target_dict: dict[str, Any] | None,
+) -> tuple[bool, int | None]:
+    """rotate/max_count: приоритет targets[] > источник > корень конфига."""
+    r: Any = cfg["rotate"] if "rotate" in cfg else False
+    mc: Any = cfg["max_count"] if "max_count" in cfg else None
+    if source_dict is not None:
+        if "rotate" in source_dict:
+            r = source_dict["rotate"]
+        if "max_count" in source_dict:
+            mc = source_dict["max_count"]
+    if target_dict is not None:
+        if "rotate" in target_dict:
+            r = target_dict["rotate"]
+        if "max_count" in target_dict:
+            mc = target_dict["max_count"]
+    if not isinstance(r, bool):
+        raise BackupError("rotate must be a boolean")
+    if r:
+        if not isinstance(mc, int) or isinstance(mc, bool) or mc < 1:
+            raise BackupError("max_count must be a positive integer when rotate is true")
+        return (True, mc)
+    return (False, None)
+
+
 def _targets_for_source_entry(
     item: dict[str, Any],
     global_target: str,
     source_mode: str,
-) -> list[tuple[str, str]]:
-    """Список пар (цель, mode) для одного источника. source_mode — режим по умолчанию для строковых целей."""
+) -> list[tuple[str, str, dict[str, Any] | None]]:
+    """(цель, mode, dict элемента targets для merge_tgz_rotate или None)."""
     ts = item.get("targets")
     if ts is not None:
         if not isinstance(ts, list) or not ts:
             raise BackupError("targets must be a non-empty list")
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, str, dict[str, Any] | None]] = []
         for x in ts:
             if isinstance(x, str):
                 if not x.strip():
                     raise BackupError("each string in targets must be non-empty")
-                out.append((x.strip(), source_mode))
+                out.append((x.strip(), source_mode, None))
             elif isinstance(x, dict):
                 dest = x.get("target")
                 if not dest or not isinstance(dest, str) or not dest.strip():
@@ -67,7 +95,7 @@ def _targets_for_source_entry(
                 m = x.get("mode", source_mode)
                 if not isinstance(m, str):
                     raise BackupError("targets[].mode must be a string")
-                out.append((dest.strip(), _validate_mode("targets[].mode", m)))
+                out.append((dest.strip(), _validate_mode("targets[].mode", m), x))
             else:
                 raise BackupError("targets entries must be strings or objects with 'target'")
         return out
@@ -75,28 +103,30 @@ def _targets_for_source_entry(
     if one is not None:
         if not isinstance(one, str) or not one.strip():
             raise BackupError("target must be a non-empty string")
-        return [(one.strip(), source_mode)]
-    return [(global_target, source_mode)]
+        return [(one.strip(), source_mode, None)]
+    return [(global_target, source_mode, None)]
 
 
 def normalize_sources(
     raw: Any,
     default_mode: str,
     global_target: str,
-) -> list[tuple[str, str, list[tuple[str, str]]]]:
-    """Возвращает список (path, name, [(destination, mode), ...]) для каждого источника."""
+    cfg: dict[str, Any],
+) -> list[tuple[str, str, list[tuple[str, str, bool, int | None]]]]:
+    """(path, name, [(destination, mode, rotate, max_count_or_none), ...])."""
     _validate_mode("default_mode", default_mode)
     if not isinstance(global_target, str) or not global_target.strip():
         raise BackupError("global target must be a non-empty string")
     gt = global_target.strip()
-    out: list[tuple[str, str, list[tuple[str, str]]]] = []
+    out: list[tuple[str, str, list[tuple[str, str, bool, int | None]]]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
     for item in raw:
         if isinstance(item, str):
             p = item
             name = Path(p).name
-            out.append((p, name, [(gt, default_mode)]))
+            rot, mc = merge_tgz_rotate(cfg, None, None)
+            out.append((p, name, [(gt, default_mode, rot, mc)]))
         elif isinstance(item, dict):
             p = item.get("path")
             if not p:
@@ -106,7 +136,10 @@ def normalize_sources(
             if not isinstance(m, str):
                 raise BackupError("source mode must be a string")
             sm = _validate_mode("source mode", m)
-            jobs = _targets_for_source_entry(item, gt, sm)
+            raw_jobs = _targets_for_source_entry(item, gt, sm)
+            jobs = [
+                (d, md, *merge_tgz_rotate(cfg, item, td)) for d, md, td in raw_jobs
+            ]
             out.append((str(p), str(name), jobs))
         else:
             raise BackupError("sources entries must be strings or objects with path")
@@ -230,12 +263,39 @@ def mode_copy(
         _run(cmd)
 
 
+def _tgz_backups_for_name(root: Path, name: str) -> list[Path]:
+    """Файлы .tgz для логического имени: name-YYYYMMDD_HHMMSS.tgz и name_YYYYMMDDHHMMSS.tgz."""
+    esc = re.escape(name)
+    legacy = re.compile(rf"^{esc}-\d{{8}}_\d{{6}}\.tgz$")
+    compact = re.compile(rf"^{esc}_\d{{14}}\.tgz$")
+    out: list[Path] = []
+    if not root.is_dir():
+        return out
+    for p in root.iterdir():
+        if p.is_file() and (legacy.match(p.name) or compact.match(p.name)):
+            out.append(p)
+    return out
+
+
+def prune_tgz_archives(root: Path, name: str, max_count: int) -> None:
+    """Оставляет не более max_count самых новых по mtime; остальные удаляет."""
+    files = _tgz_backups_for_name(root, name)
+    if len(files) <= max_count:
+        return
+    by_mtime = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in by_mtime[max_count:]:
+        LOG.info("rotate: removing old archive %s", p)
+        p.unlink()
+
+
 def mode_tgz(
     sources: list[tuple[str, str]],
     target: str,
     rsync_extra: list[str],
     *,
     underscore_datetime_suffix: bool = False,
+    rotate: bool = False,
+    max_count: int | None = None,
 ) -> None:
     base = _rsync_base() + rsync_extra
     if underscore_datetime_suffix:
@@ -253,6 +313,7 @@ def mode_tgz(
     LOG.debug("tgz temp dir: %s", tmpdir)
     try:
         archives: list[Path] = []
+        names: list[str] = []
         for src, name in sources:
             src_path = Path(src).expanduser()
             if not src_path.is_dir():
@@ -264,8 +325,14 @@ def mode_tgz(
             if r.returncode != 0:
                 raise BackupError(f"tar failed ({r.returncode}): {' '.join(tar_cmd)}")
             archives.append(arc)
+            names.append(name)
             LOG.info("created archive: %s", arc)
         if _is_remote(target):
+            if rotate and max_count is not None:
+                LOG.warning(
+                    "rotate/max_count ignored for remote target %s (local prune only)",
+                    target,
+                )
             for arc in archives:
                 cmd = base + [str(arc), target.rstrip("/") + "/"]
                 LOG.info("uploading archive -> %s", target)
@@ -277,6 +344,9 @@ def mode_tgz(
                 cmd = base + [str(arc), str(root) + "/"]
                 LOG.info("rsync archive -> %s", root)
                 _run(cmd)
+            if rotate and max_count is not None:
+                for n in names:
+                    prune_tgz_archives(root, n, max_count)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -355,7 +425,7 @@ def run_from_config(cfg: dict[str, Any]) -> None:
     target = target.strip()
 
     dm = default_mode_from_config(cfg)
-    sources = normalize_sources(cfg.get("sources"), dm, target)
+    sources = normalize_sources(cfg.get("sources"), dm, target, cfg)
     if not sources:
         raise BackupError("sources must be a non-empty list")
 
@@ -372,14 +442,29 @@ def run_from_config(cfg: dict[str, Any]) -> None:
 
     for src, name, jobs in sources:
         batch = [(src, name)]
-        for tgt, mode in jobs:
-            LOG.info("source %s name=%s mode=%s -> target %s", src, name, mode, tgt)
+        for tgt, mode, rot, mc in jobs:
+            LOG.info(
+                "source %s name=%s mode=%s -> target %s rotate=%s max_count=%s",
+                src,
+                name,
+                mode,
+                tgt,
+                rot,
+                mc,
+            )
             if mode == "update":
                 mode_update(batch, tgt, sync_delete, rsync_extra)
             elif mode == "copy":
                 mode_copy(batch, tgt, rsync_extra)
             else:
-                mode_tgz(batch, tgt, rsync_extra, underscore_datetime_suffix=tgz_dt_suffix)
+                mode_tgz(
+                    batch,
+                    tgt,
+                    rsync_extra,
+                    underscore_datetime_suffix=tgz_dt_suffix,
+                    rotate=rot,
+                    max_count=mc,
+                )
 
     place_success_flag(cfg, target)
     LOG.info("backup finished successfully")

@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import subprocess
@@ -12,29 +13,32 @@ from backup_projects.cli import (
     configure_logging,
     default_mode_from_config,
     load_config,
+    merge_tgz_rotate,
     normalize_sources,
     parse_rsync_extra,
+    prune_tgz_archives,
     resolve_log_path,
     run_from_config,
     tgz_datetime_suffix_enabled,
 )
 
 GT = "/default/backup"
+CFG0: dict = {}
 
 
 def test_normalize_sources_strings():
     raw = ["/a/b/foo", "/c/d"]
-    assert normalize_sources(raw, "update", GT) == [
-        ("/a/b/foo", "foo", [(GT, "update")]),
-        ("/c/d", "d", [(GT, "update")]),
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a/b/foo", "foo", [(GT, "update", False, None)]),
+        ("/c/d", "d", [(GT, "update", False, None)]),
     ]
 
 
 def test_normalize_sources_objects():
     raw = [{"path": "/x/y", "name": "custom"}, {"path": "/z"}]
-    assert normalize_sources(raw, "copy", GT) == [
-        ("/x/y", "custom", [(GT, "copy")]),
-        ("/z", "z", [(GT, "copy")]),
+    assert normalize_sources(raw, "copy", GT, CFG0) == [
+        ("/x/y", "custom", [(GT, "copy", False, None)]),
+        ("/z", "z", [(GT, "copy", False, None)]),
     ]
 
 
@@ -44,24 +48,24 @@ def test_normalize_sources_per_source_mode():
         "/b",
         {"path": "/c", "name": "see", "mode": "copy"},
     ]
-    assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", [(GT, "tgz")]),
-        ("/b", "b", [(GT, "update")]),
-        ("/c", "see", [(GT, "copy")]),
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [(GT, "tgz", False, None)]),
+        ("/b", "b", [(GT, "update", False, None)]),
+        ("/c", "see", [(GT, "copy", False, None)]),
     ]
 
 
 def test_normalize_sources_per_source_target():
     raw = [{"path": "/a", "target": "/mnt/usb"}]
-    assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", [("/mnt/usb", "update")]),
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [("/mnt/usb", "update", False, None)]),
     ]
 
 
 def test_normalize_sources_targets_list():
     raw = [{"path": "/a", "targets": ["/t1", "/t2"]}]
-    assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", [("/t1", "update"), ("/t2", "update")]),
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [("/t1", "update", False, None), ("/t2", "update", False, None)]),
     ]
 
 
@@ -77,14 +81,14 @@ def test_normalize_sources_targets_mixed_modes():
             ],
         }
     ]
-    assert normalize_sources(raw, "tgz", GT) == [
+    assert normalize_sources(raw, "tgz", GT, CFG0) == [
         (
             "/a",
             "a",
             [
-                ("/inc", "update"),
-                ("/snap", "copy"),
-                ("/arc", "update"),
+                ("/inc", "update", False, None),
+                ("/snap", "copy", False, None),
+                ("/arc", "update", False, None),
             ],
         ),
     ]
@@ -96,6 +100,7 @@ def test_normalize_sources_targets_object_needs_target_key():
             [{"path": "/a", "targets": [{"mode": "copy"}]}],
             "update",
             GT,
+            CFG0,
         )
 
 
@@ -105,49 +110,118 @@ def test_normalize_sources_targets_entry_mode_invalid():
             [{"path": "/a", "targets": [{"target": "/x", "mode": "bad"}]}],
             "update",
             GT,
+            CFG0,
         )
 
 
 def test_normalize_sources_targets_precedence_over_target():
     raw = [{"path": "/a", "target": "/alone", "targets": ["/x", "/y"]}]
-    assert normalize_sources(raw, "update", GT) == [
-        ("/a", "a", [("/x", "update"), ("/y", "update")]),
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [("/x", "update", False, None), ("/y", "update", False, None)]),
     ]
 
 
 def test_normalize_sources_empty_targets_rejected():
     with pytest.raises(BackupError, match="targets must be a non-empty"):
-        normalize_sources([{"path": "/a", "targets": []}], "update", GT)
+        normalize_sources([{"path": "/a", "targets": []}], "update", GT, CFG0)
 
 
 def test_normalize_sources_invalid_global_target():
     with pytest.raises(BackupError, match="global target"):
-        normalize_sources(["/a"], "update", "")
+        normalize_sources(["/a"], "update", "", CFG0)
 
 
 def test_normalize_sources_invalid_default_mode():
     with pytest.raises(BackupError, match="default_mode"):
-        normalize_sources(["/a"], "nope", GT)
+        normalize_sources(["/a"], "nope", GT, CFG0)
 
 
 def test_normalize_sources_invalid_source_mode():
     with pytest.raises(BackupError, match="source mode"):
-        normalize_sources([{"path": "/a", "mode": "bad"}], "update", GT)
+        normalize_sources([{"path": "/a", "mode": "bad"}], "update", GT, CFG0)
 
 
 def test_normalize_sources_invalid_type():
     with pytest.raises(BackupError, match="sources must be a list"):
-        normalize_sources("not-a-list", "update", GT)
+        normalize_sources("not-a-list", "update", GT, CFG0)
 
 
 def test_normalize_sources_bad_entry():
     with pytest.raises(BackupError, match="sources entries"):
-        normalize_sources([123], "update", GT)
+        normalize_sources([123], "update", GT, CFG0)
 
 
 def test_normalize_sources_targets_non_string_non_dict():
     with pytest.raises(BackupError, match="targets entries must be"):
-        normalize_sources([{"path": "/a", "targets": [1]}], "update", GT)
+        normalize_sources([{"path": "/a", "targets": [1]}], "update", GT, CFG0)
+
+
+def test_merge_tgz_rotate_global():
+    cfg = {"rotate": True, "max_count": 3}
+    assert merge_tgz_rotate(cfg, None, None) == (True, 3)
+
+
+def test_merge_tgz_rotate_source_overrides():
+    cfg = {"rotate": True, "max_count": 3}
+    src = {"rotate": False}
+    assert merge_tgz_rotate(cfg, src, None) == (False, None)
+
+
+def test_merge_tgz_rotate_target_overrides():
+    cfg = {}
+    src = {"rotate": True, "max_count": 5}
+    tgt = {"max_count": 2}
+    assert merge_tgz_rotate(cfg, src, tgt) == (True, 2)
+
+
+def test_merge_tgz_rotate_requires_max_count():
+    with pytest.raises(BackupError, match="max_count"):
+        merge_tgz_rotate({"rotate": True}, None, None)
+
+
+def test_merge_tgz_rotate_invalid_bool():
+    with pytest.raises(BackupError, match="rotate must be a boolean"):
+        merge_tgz_rotate({"rotate": "yes", "max_count": 2}, None, None)
+
+
+def test_normalize_sources_rotate_on_source():
+    raw = [{"path": "/a", "mode": "tgz", "rotate": True, "max_count": 4}]
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [(GT, "tgz", True, 4)]),
+    ]
+
+
+def test_normalize_sources_rotate_on_target_entry():
+    raw = [
+        {
+            "path": "/a",
+            "mode": "tgz",
+            "targets": [
+                {"target": "/t1", "rotate": True, "max_count": 2},
+            ],
+        }
+    ]
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/a", "a", [("/t1", "tgz", True, 2)]),
+    ]
+
+
+def test_prune_tgz_archives_keeps_newest(tmp_path: Path):
+    root = tmp_path
+    names = [
+        "arch-20260101_100000.tgz",
+        "arch-20260102_100000.tgz",
+        "arch-20260103_100000.tgz",
+        "arch-20260104_100000.tgz",
+    ]
+    for i, nm in enumerate(names):
+        p = root / nm
+        p.write_bytes(b"x")
+        ts = 1000 + i * 100
+        os.utime(p, (ts, ts))
+    prune_tgz_archives(root, "arch", 2)
+    left = {p.name for p in root.glob("*.tgz")}
+    assert left == {"arch-20260103_100000.tgz", "arch-20260104_100000.tgz"}
 
 
 def test_default_mode_from_config_prefers_default_mode():
@@ -327,6 +401,42 @@ def test_run_from_config_two_targets_update(tmp_path: Path):
     assert (d1 / "one" / "f").read_text() == "x"
     assert (d2 / "one" / "f").read_text() == "x"
     assert (flag_base / ".synced").is_file()
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_run_from_config_tgz_rotate(tmp_path: Path):
+    src = tmp_path / "src" / "box"
+    src.mkdir(parents=True)
+    (src / "a.txt").write_text("v", encoding="utf-8")
+    dst = tmp_path / "arch"
+    dst.mkdir(parents=True)
+    for i in range(4):
+        p = dst / f"box-2026010{i}_120000.tgz"
+        p.write_bytes(b"old")
+        os.utime(p, (100 + i, 100 + i))
+    log_f = tmp_path / "rot.log"
+    flag_base = tmp_path / "fb"
+    flag_base.mkdir(parents=True)
+    cfg = {
+        "target": str(flag_base),
+        "default_mode": "tgz",
+        "sources": [
+            {
+                "path": str(src),
+                "name": "box",
+                "target": str(dst),
+                "rotate": True,
+                "max_count": 3,
+            }
+        ],
+        "success_flag": ".ok",
+        "log_file": str(log_f),
+    }
+    configure_logging(log_f, verbose=False)
+    run_from_config(cfg)
+    tgzs = sorted(dst.glob("box-*.tgz"))
+    assert len(tgzs) == 3
+    assert (flag_base / ".ok").is_file()
 
 
 @pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
