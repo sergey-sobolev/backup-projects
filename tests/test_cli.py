@@ -17,7 +17,9 @@ from backup_projects.cli import (
     force_sync_enabled,
     load_config,
     max_workers_from_config,
+    merge_force_sync,
     merge_keep_different_only,
+    merge_tgz_datetime_suffix,
     merge_tgz_rotate,
     normalize_sources,
     parse_rsync_extra,
@@ -35,16 +37,16 @@ CFG0: dict = {}
 def test_normalize_sources_strings():
     raw = ["/a/b/foo", "/c/d"]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a/b/foo", "foo", [(GT, "update", False, None, False)]),
-        ("/c/d", "d", [(GT, "update", False, None, False)]),
+        ("/a/b/foo", "foo", [(GT, "update", False, None, False, False, False)]),
+        ("/c/d", "d", [(GT, "update", False, None, False, False, False)]),
     ]
 
 
 def test_normalize_sources_objects():
     raw = [{"path": "/x/y", "name": "custom"}, {"path": "/z"}]
     assert normalize_sources(raw, "copy", GT, CFG0) == [
-        ("/x/y", "custom", [(GT, "copy", False, None, False)]),
-        ("/z", "z", [(GT, "copy", False, None, False)]),
+        ("/x/y", "custom", [(GT, "copy", False, None, False, False, False)]),
+        ("/z", "z", [(GT, "copy", False, None, False, False, False)]),
     ]
 
 
@@ -55,23 +57,23 @@ def test_normalize_sources_per_source_mode():
         {"path": "/c", "name": "see", "mode": "copy"},
     ]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [(GT, "tgz", False, None, False)]),
-        ("/b", "b", [(GT, "update", False, None, False)]),
-        ("/c", "see", [(GT, "copy", False, None, False)]),
+        ("/a", "a", [(GT, "tgz", False, None, False, False, False)]),
+        ("/b", "b", [(GT, "update", False, None, False, False, False)]),
+        ("/c", "see", [(GT, "copy", False, None, False, False, False)]),
     ]
 
 
 def test_normalize_sources_per_source_target():
     raw = [{"path": "/a", "target": "/mnt/usb"}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/mnt/usb", "update", False, None, False)]),
+        ("/a", "a", [("/mnt/usb", "update", False, None, False, False, False)]),
     ]
 
 
 def test_normalize_sources_targets_list():
     raw = [{"path": "/a", "targets": ["/t1", "/t2"]}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/t1", "update", False, None, False), ("/t2", "update", False, None, False)]),
+        ("/a", "a", [("/t1", "update", False, None, False, False, False), ("/t2", "update", False, None, False, False, False)]),
     ]
 
 
@@ -92,9 +94,9 @@ def test_normalize_sources_targets_mixed_modes():
             "/a",
             "a",
             [
-                ("/inc", "update", False, None, False),
-                ("/snap", "copy", False, None, False),
-                ("/arc", "update", False, None, False),
+                ("/inc", "update", False, None, False, False, False),
+                ("/snap", "copy", False, None, False, False, False),
+                ("/arc", "update", False, None, False, False, False),
             ],
         ),
     ]
@@ -123,7 +125,7 @@ def test_normalize_sources_targets_entry_mode_invalid():
 def test_normalize_sources_targets_precedence_over_target():
     raw = [{"path": "/a", "target": "/alone", "targets": ["/x", "/y"]}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/x", "update", False, None, False), ("/y", "update", False, None, False)]),
+        ("/a", "a", [("/x", "update", False, None, False, False, False), ("/y", "update", False, None, False, False, False)]),
     ]
 
 
@@ -164,8 +166,8 @@ def test_normalize_sources_enable_false_skips():
         {"path": "/c", "enable": True},
     ]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/b", "b", [(GT, "update", False, None, False)]),
-        ("/c", "c", [(GT, "update", False, None, False)]),
+        ("/b", "b", [(GT, "update", False, None, False, False, False)]),
+        ("/c", "c", [(GT, "update", False, None, False, False, False)]),
     ]
 
 
@@ -249,26 +251,103 @@ def test_merge_keep_different_only_defaults_and_overrides():
     assert merge_keep_different_only({}, {"keep_different_only": False}, tgt) is True
 
 
+def test_merge_force_sync_priority():
+    assert merge_force_sync({}, None, None) is False
+    assert merge_force_sync({"force_sync": True}, None, None) is True
+    assert merge_force_sync({"force_sync": True}, {"force_sync": False}, None) is False
+    assert merge_force_sync({}, None, {"force_sync": True}) is True
+
+
+def test_merge_tgz_datetime_suffix_timestamp_alias():
+    assert merge_tgz_datetime_suffix({"timestamp": True}, None, None) is True
+    assert merge_tgz_datetime_suffix({"tgz_datetime_suffix": False}, None, None) is False
+    assert merge_tgz_datetime_suffix({}, {"timestamp": True}, None) is True
+    td = {"tgz_datetime_suffix": True}
+    assert merge_tgz_datetime_suffix({"timestamp": False}, None, td) is True
+
+
 def test_merge_keep_different_only_invalid():
     with pytest.raises(BackupError, match="keep_different_only"):
         merge_keep_different_only({"keep_different_only": "yes"}, None, None)
 
 
+def test_normalize_sources_targets_defaults_on_strings():
+    raw = [
+        {
+            "path": "/src",
+            "targets_defaults": {
+                "mode": "tgz",
+                "timestamp": True,
+                "rotate": True,
+                "max_count": 3,
+                "force_sync": True,
+                "keep_different_only": True,
+            },
+            "targets": ["/a", {"target": "/b", "mode": "update"}],
+        }
+    ]
+    out = normalize_sources(raw, "update", GT, CFG0)
+    assert len(out) == 1
+    jobs = out[0][2]
+    by_tgt = {j[0]: j for j in jobs}
+    assert by_tgt["/a"][1:7] == ("tgz", True, 3, True, True, True)
+    assert by_tgt["/b"][1] == "update"
+    assert by_tgt["/b"][2:7] == (True, 3, True, True, True)
+
+
+def test_normalize_sources_targets_defaults_with_implicit_global_target():
+    raw = [
+        {
+            "path": "/x",
+            "targets_defaults": {"mode": "copy"},
+        }
+    ]
+    assert normalize_sources(raw, "update", GT, CFG0) == [
+        ("/x", "x", [(GT, "copy", False, None, False, False, False)]),
+    ]
+
+
+def test_targets_defaults_rejects_target_key():
+    with pytest.raises(BackupError, match="targets_defaults must not contain"):
+        normalize_sources(
+            [
+                {
+                    "path": "/a",
+                    "targets_defaults": {"target": "/bad"},
+                    "targets": ["/t"],
+                }
+            ],
+            "update",
+            GT,
+            CFG0,
+        )
+
+
+def test_targets_defaults_must_be_mapping():
+    with pytest.raises(BackupError, match="targets_defaults must be a mapping"):
+        normalize_sources(
+            [{"path": "/a", "targets_defaults": [1], "targets": ["/t"]}],
+            "update",
+            GT,
+            CFG0,
+        )
+
+
 def test_normalize_sources_keep_different_only():
     raw = [{"path": "/a", "mode": "tgz", "keep_different_only": True}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [(GT, "tgz", False, None, True)]),
+        ("/a", "a", [(GT, "tgz", False, None, True, False, False)]),
     ]
     cfg_g = {"keep_different_only": True}
     assert normalize_sources(["/x"], "update", GT, cfg_g) == [
-        ("/x", "x", [(GT, "update", False, None, True)]),
+        ("/x", "x", [(GT, "update", False, None, True, False, False)]),
     ]
 
 
 def test_normalize_sources_rotate_on_source():
     raw = [{"path": "/a", "mode": "tgz", "rotate": True, "max_count": 4}]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [(GT, "tgz", True, 4, False)]),
+        ("/a", "a", [(GT, "tgz", True, 4, False, False, False)]),
     ]
 
 
@@ -283,7 +362,7 @@ def test_normalize_sources_rotate_on_target_entry():
         }
     ]
     assert normalize_sources(raw, "update", GT, CFG0) == [
-        ("/a", "a", [("/t1", "tgz", True, 2, False)]),
+        ("/a", "a", [("/t1", "tgz", True, 2, False, False, False)]),
     ]
 
 
@@ -363,8 +442,13 @@ def test_tgz_datetime_suffix_enabled():
 
 
 def test_tgz_datetime_suffix_invalid_type():
-    with pytest.raises(BackupError, match="tgz_datetime_suffix"):
+    with pytest.raises(BackupError, match="tgz_datetime_suffix or timestamp"):
         tgz_datetime_suffix_enabled({"tgz_datetime_suffix": "yes"})
+
+
+def test_merge_tgz_datetime_suffix_invalid_timestamp_type():
+    with pytest.raises(BackupError, match="tgz_datetime_suffix or timestamp"):
+        merge_tgz_datetime_suffix({"timestamp": "yes"}, None, None)
 
 
 def test_force_sync_enabled():
@@ -380,10 +464,10 @@ def test_force_sync_enabled_invalid_type():
 
 def test_local_backup_sync_roots_local_tasks_and_flag_base():
     tasks = [
-        ("/src", "n", "/mnt/usb/backup", "update", False, None, False),
-        ("/src2", "n2", "/other", "copy", False, None, False),
+        ("/src", "n", "/mnt/usb/backup", "update", False, None, False, False, False),
+        ("/src2", "n2", "/other", "copy", False, None, False, False, False),
     ]
-    roots = _local_backup_sync_roots(tasks, "/var/flag-base")
+    roots = _local_backup_sync_roots(tasks, "/var/flag-base", global_force_sync=True)
     assert roots == sorted(
         [
             Path("/mnt/usb/backup").resolve(),
@@ -395,8 +479,18 @@ def test_local_backup_sync_roots_local_tasks_and_flag_base():
 
 
 def test_local_backup_sync_roots_skips_remote():
-    tasks = [("/a", "b", "user@host:/path", "update", False, None, False)]
-    assert _local_backup_sync_roots(tasks, "user@host:/root") == []
+    tasks = [("/a", "b", "user@host:/path", "update", False, None, False, False, False)]
+    assert _local_backup_sync_roots(tasks, "user@host:/root", global_force_sync=True) == []
+
+
+def test_local_backup_sync_roots_per_job_force_sync_without_global():
+    tasks = [
+        ("/s", "n", "/only-here", "update", False, None, False, False, True),
+        ("/s", "n", "/skip-me", "update", False, None, False, False, False),
+    ]
+    assert _local_backup_sync_roots(tasks, "/flag", global_force_sync=False) == [
+        Path("/only-here").resolve(),
+    ]
 
 
 def test_sync_local_destination_paths_noop_empty():

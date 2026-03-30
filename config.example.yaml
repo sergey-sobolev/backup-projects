@@ -20,15 +20,19 @@ sources:
   #   enable: false
   - path: /home/user/documents
     name: docs
-  # Несколько целей: строки (режим = mode источника) и объекты { target, mode? }
+  # Несколько целей: строки и объекты { target, mode?, ... }; общие поля — в targets_defaults (без ключа target)
   # - path: /home/user/photos
-  #   mode: update
+  #   targets_defaults:
+  #     mode: tgz
+  #     timestamp: true
+  #     rotate: true
+  #     max_count: 3
+  #     force_sync: true
+  #     keep_different_only: true
   #   targets:
-  #     - /media/usb/photos
+  #     - /media/usb/photos-tgz
   #     - target: user@nas:/backups/photos
   #       mode: update
-  #     - target: /media/usb/photos-tgz-drop
-  #       mode: tgz
   # - path: /home/user/snapshot-me
   #   mode: copy
   #   target: /media/usb/snapshots

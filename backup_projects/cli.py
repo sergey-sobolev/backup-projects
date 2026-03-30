@@ -91,12 +91,83 @@ def merge_keep_different_only(
     return k
 
 
+def _mapping_datetime_choice(d: dict[str, Any] | None) -> Any | None:
+    if not d:
+        return None
+    if "tgz_datetime_suffix" in d:
+        return d["tgz_datetime_suffix"]
+    if "timestamp" in d:
+        return d["timestamp"]
+    return None
+
+
+def merge_tgz_datetime_suffix(
+    cfg: dict[str, Any],
+    source_dict: dict[str, Any] | None,
+    target_dict: dict[str, Any] | None,
+) -> bool:
+    """tgz_datetime_suffix / алиас timestamp: приоритет targets[] > источник > корень."""
+    raw: Any = None
+    cv = _mapping_datetime_choice(cfg)
+    if cv is not None:
+        raw = cv
+    sv = _mapping_datetime_choice(source_dict)
+    if sv is not None:
+        raw = sv
+    tv = _mapping_datetime_choice(target_dict)
+    if tv is not None:
+        raw = tv
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise BackupError("tgz_datetime_suffix or timestamp must be a boolean")
+    return raw
+
+
+def merge_force_sync(
+    cfg: dict[str, Any],
+    source_dict: dict[str, Any] | None,
+    target_dict: dict[str, Any] | None,
+) -> bool:
+    """force_sync: приоритет targets[] > источник > корень конфига."""
+    k: Any = False
+    if "force_sync" in cfg:
+        k = cfg["force_sync"]
+    if source_dict is not None and "force_sync" in source_dict:
+        k = source_dict["force_sync"]
+    if target_dict is not None and "force_sync" in target_dict:
+        k = target_dict["force_sync"]
+    if not isinstance(k, bool):
+        raise BackupError("force_sync must be a boolean")
+    return k
+
+
+def _mode_for_target_td(td: dict[str, Any] | None, source_mode: str) -> str:
+    if td is None or "mode" not in td:
+        return source_mode
+    m = td["mode"]
+    if not isinstance(m, str):
+        raise BackupError("targets[].mode must be a string")
+    return _validate_mode("targets[].mode", m)
+
+
 def _targets_for_source_entry(
     item: dict[str, Any],
     global_target: str,
     source_mode: str,
 ) -> list[tuple[str, str, dict[str, Any] | None]]:
-    """(цель, mode, dict элемента targets для merge_tgz_rotate или None)."""
+    """(цель, mode, dict для merge_* или None)."""
+    defaults_raw = item.get("targets_defaults")
+    defaults: dict[str, Any] | None
+    if defaults_raw is None:
+        defaults = None
+    else:
+        if not isinstance(defaults_raw, dict):
+            raise BackupError("targets_defaults must be a mapping")
+        if "target" in defaults_raw:
+            raise BackupError("targets_defaults must not contain 'target'")
+        defaults = dict(defaults_raw)
+
     ts = item.get("targets")
     if ts is not None:
         if not isinstance(ts, list) or not ts:
@@ -106,15 +177,23 @@ def _targets_for_source_entry(
             if isinstance(x, str):
                 if not x.strip():
                     raise BackupError("each string in targets must be non-empty")
-                out.append((x.strip(), source_mode, None))
+                dest = x.strip()
+                if defaults:
+                    td: dict[str, Any] = dict(defaults)
+                    td["target"] = dest
+                else:
+                    td = None
+                out.append((dest, _mode_for_target_td(td, source_mode), td))
             elif isinstance(x, dict):
-                dest = x.get("target")
-                if not dest or not isinstance(dest, str) or not dest.strip():
+                if defaults:
+                    td = dict(defaults)
+                    td.update(x)
+                else:
+                    td = dict(x)
+                dest = td.get("target")
+                if not dest or not isinstance(dest, str) or not str(dest).strip():
                     raise BackupError("each targets[] object needs non-empty 'target'")
-                m = x.get("mode", source_mode)
-                if not isinstance(m, str):
-                    raise BackupError("targets[].mode must be a string")
-                out.append((dest.strip(), _validate_mode("targets[].mode", m), x))
+                out.append((str(dest).strip(), _mode_for_target_td(td, source_mode), td))
             else:
                 raise BackupError("targets entries must be strings or objects with 'target'")
         return out
@@ -122,7 +201,16 @@ def _targets_for_source_entry(
     if one is not None:
         if not isinstance(one, str) or not one.strip():
             raise BackupError("target must be a non-empty string")
-        return [(one.strip(), source_mode, None)]
+        dest = one.strip()
+        if defaults:
+            td_one = dict(defaults)
+            td_one["target"] = dest
+            return [(dest, _mode_for_target_td(td_one, source_mode), td_one)]
+        return [(dest, source_mode, None)]
+    if defaults:
+        td_g = dict(defaults)
+        td_g["target"] = global_target
+        return [(global_target, _mode_for_target_td(td_g, source_mode), td_g)]
     return [(global_target, source_mode, None)]
 
 
@@ -131,13 +219,13 @@ def normalize_sources(
     default_mode: str,
     global_target: str,
     cfg: dict[str, Any],
-) -> list[tuple[str, str, list[tuple[str, str, bool, int | None, bool]]]]:
-    """(path, name, [(destination, mode, rotate, max_count_or_none, keep_different_only), ...])."""
+) -> list[tuple[str, str, list[tuple[str, str, bool, int | None, bool, bool, bool]]]]:
+    """(path, name, [(destination, mode, rotate, max_count, kdo, tgz_dt_suffix, force_sync), ...])."""
     _validate_mode("default_mode", default_mode)
     if not isinstance(global_target, str) or not global_target.strip():
         raise BackupError("global target must be a non-empty string")
     gt = global_target.strip()
-    out: list[tuple[str, str, list[tuple[str, str, bool, int | None, bool]]]] = []
+    out: list[tuple[str, str, list[tuple[str, str, bool, int | None, bool, bool, bool]]]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
     for item in raw:
@@ -146,7 +234,9 @@ def normalize_sources(
             name = Path(p).name
             rot, mc = merge_tgz_rotate(cfg, None, None)
             kdo = merge_keep_different_only(cfg, None, None)
-            out.append((p, name, [(gt, default_mode, rot, mc, kdo)]))
+            tgdt = merge_tgz_datetime_suffix(cfg, None, None)
+            fsj = merge_force_sync(cfg, None, None)
+            out.append((p, name, [(gt, default_mode, rot, mc, kdo, tgdt, fsj)]))
         elif isinstance(item, dict):
             if "enable" in item:
                 ev = item["enable"]
@@ -169,6 +259,8 @@ def normalize_sources(
                     md,
                     *merge_tgz_rotate(cfg, item, td),
                     merge_keep_different_only(cfg, item, td),
+                    merge_tgz_datetime_suffix(cfg, item, td),
+                    merge_force_sync(cfg, item, td),
                 )
                 for d, md, td in raw_jobs
             ]
@@ -186,21 +278,13 @@ def _rsync_base() -> list[str]:
 
 
 def tgz_datetime_suffix_enabled(cfg: dict[str, Any]) -> bool:
-    raw = cfg.get("tgz_datetime_suffix")
-    if raw is None:
-        return False
-    if not isinstance(raw, bool):
-        raise BackupError("tgz_datetime_suffix must be a boolean")
-    return raw
+    """Устаревшее имя: то же, что merge_tgz_datetime_suffix(cfg, None, None) (без источника/target)."""
+    return merge_tgz_datetime_suffix(cfg, None, None)
 
 
 def force_sync_enabled(cfg: dict[str, Any]) -> bool:
-    if "force_sync" not in cfg:
-        return False
-    raw = cfg["force_sync"]
-    if not isinstance(raw, bool):
-        raise BackupError("force_sync must be a boolean")
-    return raw
+    """Устаревшее имя: merge_force_sync(cfg, None, None)."""
+    return merge_force_sync(cfg, None, None)
 
 
 def parse_rsync_extra(cfg: dict[str, Any]) -> list[str]:
@@ -232,15 +316,17 @@ def _local_target_root(target: str) -> Path:
 
 
 def _local_backup_sync_roots(
-    tasks: list[tuple[str, str, str, str, bool, int | None, bool]],
+    tasks: list[tuple[str, str, str, str, bool, int | None, bool, bool, bool]],
     root_target: str,
+    *,
+    global_force_sync: bool,
 ) -> list[Path]:
-    """Уникальные локальные корни назначения (задачи + корневой target для флага)."""
+    """Локальные пути для sync: задачи с per-job или глобальным force_sync + корень при глобальном."""
     roots: set[Path] = set()
-    for _, _, tgt, _, _, _, _ in tasks:
-        if not _is_remote(tgt):
+    for _, _, tgt, _, _, _, _, _, job_fs in tasks:
+        if not _is_remote(tgt) and (global_force_sync or job_fs):
             roots.add(_local_target_root(tgt))
-    if not _is_remote(root_target):
+    if not _is_remote(root_target) and global_force_sync:
         roots.add(_local_target_root(root_target))
     return sorted(roots, key=lambda p: str(p))
 
@@ -525,10 +611,12 @@ def _run_backup_job(
     rsync_extra: list[str],
     tgz_dt_suffix: bool,
     keep_different_only: bool,
+    force_sync_job: bool,
 ) -> None:
     batch = [(src, name)]
     LOG.info(
-        "job: source %s name=%s mode=%s -> target %s rotate=%s max_count=%s keep_different_only=%s",
+        "job: source %s name=%s mode=%s -> target %s rotate=%s max_count=%s "
+        "keep_different_only=%s tgz_datetime_suffix=%s force_sync=%s",
         src,
         name,
         mode,
@@ -536,6 +624,8 @@ def _run_backup_job(
         rot,
         mc,
         keep_different_only,
+        tgz_dt_suffix,
+        force_sync_job,
     )
     if mode == "update":
         mode_update(batch, tgt, sync_delete, rsync_extra)
@@ -594,13 +684,12 @@ def run_from_config(cfg: dict[str, Any]) -> None:
 
     rsync_extra = parse_rsync_extra(cfg)
     sync_delete = bool(cfg.get("sync_delete", False))
-    tgz_dt_suffix = tgz_datetime_suffix_enabled(cfg)
-    do_force_sync = force_sync_enabled(cfg)
+    global_force_sync = merge_force_sync(cfg, None, None)
 
-    tasks: list[tuple[str, str, str, str, bool, int | None, bool]] = []
+    tasks: list[tuple[str, str, str, str, bool, int | None, bool, bool, bool]] = []
     for src, name, jobs in sources:
-        for tgt, mode, rot, mc, kdo in jobs:
-            tasks.append((src, name, tgt, mode, rot, mc, kdo))
+        for tgt, mode, rot, mc, kdo, tgdt, fsj in jobs:
+            tasks.append((src, name, tgt, mode, rot, mc, kdo, tgdt, fsj))
 
     workers = max_workers_from_config(cfg, len(tasks))
     LOG.info(
@@ -624,18 +713,22 @@ def run_from_config(cfg: dict[str, Any]) -> None:
                 mc,
                 sync_delete,
                 rsync_extra,
-                tgz_dt_suffix,
+                tgdt,
                 kdo,
+                fsj,
             )
-            for src, name, tgt, mode, rot, mc, kdo in tasks
+            for src, name, tgt, mode, rot, mc, kdo, tgdt, fsj in tasks
         ]
         for fut in futures:
             fut.result()
 
     place_success_flag(cfg, target)
 
-    if do_force_sync:
-        _sync_local_destination_paths(_local_backup_sync_roots(tasks, target))
+    sync_roots = _local_backup_sync_roots(
+        tasks, target, global_force_sync=global_force_sync
+    )
+    if sync_roots:
+        _sync_local_destination_paths(sync_roots)
 
     LOG.info("backup finished successfully")
 
