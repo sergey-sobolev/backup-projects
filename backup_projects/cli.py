@@ -151,52 +151,76 @@ def _mode_for_target_td(td: dict[str, Any] | None, source_mode: str) -> str:
     return _validate_mode("targets[].mode", m)
 
 
+def _parse_targets_defaults_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    defaults_raw = item.get("targets_defaults")
+    if defaults_raw is None:
+        return None
+    if not isinstance(defaults_raw, dict):
+        raise BackupError("targets_defaults must be a mapping")
+    if "target" in defaults_raw:
+        raise BackupError("targets_defaults must not contain 'target'")
+    return dict(defaults_raw)
+
+
+def _targets_list_to_jobs(
+    entries: list[Any],
+    defaults: dict[str, Any] | None,
+    source_mode: str,
+    *,
+    list_label: str,
+) -> list[tuple[str, str, dict[str, Any] | None]]:
+    """Разбор списка целей (targets или default_targets): строки и { target, ... }."""
+    if not isinstance(entries, list) or not entries:
+        raise BackupError(f"{list_label} must be a non-empty list")
+    out: list[tuple[str, str, dict[str, Any] | None]] = []
+    for x in entries:
+        if isinstance(x, str):
+            if not x.strip():
+                raise BackupError(f"each string in {list_label} must be non-empty")
+            dest = x.strip()
+            if defaults:
+                td: dict[str, Any] = dict(defaults)
+                td["target"] = dest
+            else:
+                td = None
+            out.append((dest, _mode_for_target_td(td, source_mode), td))
+        elif isinstance(x, dict):
+            if defaults:
+                td = dict(defaults)
+                td.update(x)
+            else:
+                td = dict(x)
+            dest = td.get("target")
+            if not dest or not isinstance(dest, str) or not str(dest).strip():
+                raise BackupError(f"each {list_label} object needs non-empty 'target'")
+            out.append((str(dest).strip(), _mode_for_target_td(td, source_mode), td))
+        else:
+            raise BackupError(f"{list_label} entries must be strings or objects with 'target'")
+    return out
+
+
+def default_targets_from_config(cfg: dict[str, Any]) -> list[Any] | None:
+    """Корневой default_targets: список целей по умолчанию, если у источника нет target/targets."""
+    raw = cfg.get("default_targets")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise BackupError("default_targets must be a non-empty list")
+    return raw
+
+
 def _targets_for_source_entry(
     item: dict[str, Any],
     global_target: str,
     source_mode: str,
+    default_targets_list: list[Any] | None,
 ) -> list[tuple[str, str, dict[str, Any] | None]]:
     """(цель, mode, dict для merge_* или None)."""
-    defaults_raw = item.get("targets_defaults")
-    defaults: dict[str, Any] | None
-    if defaults_raw is None:
-        defaults = None
-    else:
-        if not isinstance(defaults_raw, dict):
-            raise BackupError("targets_defaults must be a mapping")
-        if "target" in defaults_raw:
-            raise BackupError("targets_defaults must not contain 'target'")
-        defaults = dict(defaults_raw)
+    defaults = _parse_targets_defaults_from_item(item)
 
     ts = item.get("targets")
     if ts is not None:
-        if not isinstance(ts, list) or not ts:
-            raise BackupError("targets must be a non-empty list")
-        out: list[tuple[str, str, dict[str, Any] | None]] = []
-        for x in ts:
-            if isinstance(x, str):
-                if not x.strip():
-                    raise BackupError("each string in targets must be non-empty")
-                dest = x.strip()
-                if defaults:
-                    td: dict[str, Any] = dict(defaults)
-                    td["target"] = dest
-                else:
-                    td = None
-                out.append((dest, _mode_for_target_td(td, source_mode), td))
-            elif isinstance(x, dict):
-                if defaults:
-                    td = dict(defaults)
-                    td.update(x)
-                else:
-                    td = dict(x)
-                dest = td.get("target")
-                if not dest or not isinstance(dest, str) or not str(dest).strip():
-                    raise BackupError("each targets[] object needs non-empty 'target'")
-                out.append((str(dest).strip(), _mode_for_target_td(td, source_mode), td))
-            else:
-                raise BackupError("targets entries must be strings or objects with 'target'")
-        return out
+        return _targets_list_to_jobs(ts, defaults, source_mode, list_label="targets")
     one = item.get("target")
     if one is not None:
         if not isinstance(one, str) or not one.strip():
@@ -207,6 +231,10 @@ def _targets_for_source_entry(
             td_one["target"] = dest
             return [(dest, _mode_for_target_td(td_one, source_mode), td_one)]
         return [(dest, source_mode, None)]
+    if default_targets_list is not None:
+        return _targets_list_to_jobs(
+            default_targets_list, defaults, source_mode, list_label="default_targets"
+        )
     if defaults:
         td_g = dict(defaults)
         td_g["target"] = global_target
@@ -228,15 +256,33 @@ def normalize_sources(
     out: list[tuple[str, str, list[tuple[str, str, bool, int | None, bool, bool, bool]]]] = []
     if not isinstance(raw, list):
         raise BackupError("sources must be a list")
+    dt_list = default_targets_from_config(cfg)
     for item in raw:
         if isinstance(item, str):
             p = item
             name = Path(p).name
-            rot, mc = merge_tgz_rotate(cfg, None, None)
-            kdo = merge_keep_different_only(cfg, None, None)
-            tgdt = merge_tgz_datetime_suffix(cfg, None, None)
-            fsj = merge_force_sync(cfg, None, None)
-            out.append((p, name, [(gt, default_mode, rot, mc, kdo, tgdt, fsj)]))
+            if dt_list is not None:
+                raw_jobs = _targets_list_to_jobs(
+                    dt_list, None, default_mode, list_label="default_targets"
+                )
+                jobs = [
+                    (
+                        d,
+                        md,
+                        *merge_tgz_rotate(cfg, None, td),
+                        merge_keep_different_only(cfg, None, td),
+                        merge_tgz_datetime_suffix(cfg, None, td),
+                        merge_force_sync(cfg, None, td),
+                    )
+                    for d, md, td in raw_jobs
+                ]
+                out.append((p, name, jobs))
+            else:
+                rot, mc = merge_tgz_rotate(cfg, None, None)
+                kdo = merge_keep_different_only(cfg, None, None)
+                tgdt = merge_tgz_datetime_suffix(cfg, None, None)
+                fsj = merge_force_sync(cfg, None, None)
+                out.append((p, name, [(gt, default_mode, rot, mc, kdo, tgdt, fsj)]))
         elif isinstance(item, dict):
             if "enable" in item:
                 ev = item["enable"]
@@ -252,7 +298,7 @@ def normalize_sources(
             if not isinstance(m, str):
                 raise BackupError("source mode must be a string")
             sm = _validate_mode("source mode", m)
-            raw_jobs = _targets_for_source_entry(item, gt, sm)
+            raw_jobs = _targets_for_source_entry(item, gt, sm, dt_list)
             jobs = [
                 (
                     d,

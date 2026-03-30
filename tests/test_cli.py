@@ -14,6 +14,7 @@ from backup_projects.cli import (
     _sync_local_destination_paths,
     configure_logging,
     default_mode_from_config,
+    default_targets_from_config,
     force_sync_enabled,
     load_config,
     max_workers_from_config,
@@ -32,6 +33,70 @@ from backup_projects.cli import (
 
 GT = "/default/backup"
 CFG0: dict = {}
+
+
+def test_default_targets_from_config():
+    assert default_targets_from_config({}) is None
+    assert default_targets_from_config({"default_targets": ["/x"]}) == ["/x"]
+
+
+def test_default_targets_invalid_empty():
+    with pytest.raises(BackupError, match="default_targets"):
+        default_targets_from_config({"default_targets": []})
+
+
+def test_default_targets_invalid_type():
+    with pytest.raises(BackupError, match="default_targets"):
+        default_targets_from_config({"default_targets": "/not-a-list"})
+
+
+def test_normalize_sources_string_expands_root_default_targets():
+    cfg = {"default_targets": ["/a", {"target": "/b", "mode": "copy"}]}
+    assert normalize_sources(["/home/proj"], "update", GT, cfg) == [
+        (
+            "/home/proj",
+            "proj",
+            [
+                ("/a", "update", False, None, False, False, False),
+                ("/b", "copy", False, None, False, False, False),
+            ],
+        ),
+    ]
+
+
+def test_normalize_sources_dict_without_target_uses_default_targets():
+    cfg = {"default_targets": ["/t1", "/t2"]}
+    assert normalize_sources([{"path": "/src"}], "update", GT, cfg) == [
+        (
+            "/src",
+            "src",
+            [
+                ("/t1", "update", False, None, False, False, False),
+                ("/t2", "update", False, None, False, False, False),
+            ],
+        ),
+    ]
+
+
+def test_normalize_sources_explicit_targets_ignore_default_targets():
+    cfg = {"default_targets": ["/ignored", "/also"]}
+    assert normalize_sources(
+        [{"path": "/x", "targets": ["/only"]}],
+        "update",
+        GT,
+        cfg,
+    ) == [("/x", "x", [("/only", "update", False, None, False, False, False)])]
+
+
+def test_normalize_sources_default_targets_merged_with_targets_defaults():
+    cfg = {"default_targets": ["/l1", "/l2"]}
+    raw = [{"path": "/p", "targets_defaults": {"mode": "tgz", "rotate": True, "max_count": 2}}]
+    out = normalize_sources(raw, "update", GT, cfg)
+    jobs = out[0][2]
+    assert len(jobs) == 2
+    for j in jobs:
+        assert j[1] == "tgz"
+        assert j[2] is True and j[3] == 2
 
 
 def test_normalize_sources_strings():
