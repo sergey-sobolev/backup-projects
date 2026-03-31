@@ -3,7 +3,7 @@
 # Пути с пробелами в YAML — в кавычках, например path: "/home/user/My Documents/proj"
 # Удалённый сервер (user@host:/path, rsync по SSH): см. config.remote.example.yaml
 
-# Цель по умолчанию: локальный путь или rsync-цель (user@host:/path).
+# Цель по умолчанию: локальный путь или rsync-цель (user@host:/path или host:/path).
 # У источника: target или targets; в targets у каждой цели может быть свой mode (см. закомментированные примеры).
 # Если задан default_targets (список, как targets), источники без своих target/targets шлют бэкап на все эти цели.
 # default_targets:
@@ -19,8 +19,13 @@ target: /media/usb/backup
 default_mode: update
 
 # Список каталогов-источников (строка или объект с path; опционально enable, name, mode, target или targets)
+# path может быть удалённым: user@host:/path, host:/path (без пользователя — как в ssh/rsync), host::module/...
 sources:
   - /home/user/projects/myapp
+  # Удалённый источник (rsync по SSH) — без имени пользователя, если хватает ~/.ssh/config или дефолтного user:
+  # - path: "nas:/export/backup/myproject"
+  #   name: remote-proj
+  #   target: /media/usb/backup
   # - path: /home/user/skipped
   #   enable: false
   - path: /home/user/documents

@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from backup_projects import __version__
 from backup_projects.cli import (
     BackupError,
+    _is_rsync_remote_spec,
     _local_backup_sync_roots,
     _sync_local_destination_paths,
     configure_logging,
@@ -22,6 +24,9 @@ from backup_projects.cli import (
     merge_keep_different_only,
     merge_tgz_datetime_suffix,
     merge_tgz_rotate,
+    mode_copy,
+    mode_tgz,
+    mode_update,
     normalize_sources,
     parse_rsync_extra,
     prune_tgz_archives,
@@ -501,6 +506,85 @@ def test_parse_rsync_extra_invalid():
         parse_rsync_extra({"rsync_extra": 1})
 
 
+def test_is_rsync_remote_spec():
+    assert _is_rsync_remote_spec("user@host:/abs/path") is True
+    assert _is_rsync_remote_spec("nas:/export/backup/data") is True
+    assert _is_rsync_remote_spec("192.168.1.10:/var/lib/foo") is True
+    assert _is_rsync_remote_spec("host::module/sub") is True
+    assert _is_rsync_remote_spec("/local/path") is False
+    assert _is_rsync_remote_spec("relative/local") is False
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_mode_update_remote_source_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorded: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> None:
+        recorded.append(cmd)
+
+    monkeypatch.setattr("backup_projects.cli._run", fake_run)
+    dst = tmp_path / "backup"
+    mode_update([("user@host:/data/src", "proj")], str(dst), False, [])
+    assert len(recorded) == 1
+    assert recorded[0][-2] == "user@host:/data/src/"
+    assert recorded[0][-1] == str(dst / "proj") + "/"
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_mode_update_remote_source_host_without_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorded: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> None:
+        recorded.append(cmd)
+
+    monkeypatch.setattr("backup_projects.cli._run", fake_run)
+    dst = tmp_path / "backup"
+    mode_update([("nas:/export/myproject", "proj")], str(dst), False, [])
+    assert len(recorded) == 1
+    assert recorded[0][-2] == "nas:/export/myproject/"
+    assert recorded[0][-1] == str(dst / "proj") + "/"
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_mode_copy_remote_source_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorded: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> None:
+        recorded.append(cmd)
+
+    monkeypatch.setattr("backup_projects.cli._run", fake_run)
+    dst = tmp_path / "backup"
+    mode_copy([("user@host:/data/src", "proj")], str(dst), [])
+    assert len(recorded) == 1
+    assert recorded[0][-2] == "user@host:/data/src/"
+    assert recorded[0][-1].startswith(str(dst / "proj-"))
+    assert recorded[0][-1].endswith("/")
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="rsync not installed")
+def test_mode_tgz_remote_source_fetch_then_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    recorded: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> None:
+        recorded.append(cmd)
+        if len(recorded) == 1:
+            dest = cmd[-1].rstrip("/")
+            Path(dest).mkdir(parents=True, exist_ok=True)
+            (Path(dest) / "x.txt").write_text("ok", encoding="utf-8")
+        elif len(recorded) == 2:
+            arc = Path(cmd[-2])
+            dest_dir = Path(cmd[-1].rstrip("/"))
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(arc, dest_dir / arc.name)
+
+    monkeypatch.setattr("backup_projects.cli._run", fake_run)
+    out = tmp_path / "archives"
+    mode_tgz([("user@host:/remote/dir", "rproj")], str(out), [])
+    assert len(recorded) == 2
+    assert "user@host:/remote/dir/" in recorded[0]
+    assert len(list(out.glob("rproj-*.tgz"))) == 1
+
+
 def test_tgz_datetime_suffix_enabled():
     assert tgz_datetime_suffix_enabled({}) is False
     assert tgz_datetime_suffix_enabled({"tgz_datetime_suffix": True}) is True
@@ -937,3 +1021,32 @@ def test_module_main():
     )
     assert r.returncode == 0
     assert "YAML" in r.stdout or "yaml" in r.stdout.lower() or "config" in r.stdout.lower()
+
+
+def test_module_main_help_long_option():
+    repo = Path(__file__).resolve().parents[1]
+    r = subprocess.run(
+        [sys.executable, "-m", "backup_projects", "--help"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(repo)},
+        check=False,
+    )
+    assert r.returncode == 0
+    assert "--config" in r.stdout
+
+
+def test_module_main_version():
+    repo = Path(__file__).resolve().parents[1]
+    r = subprocess.run(
+        [sys.executable, "-m", "backup_projects", "--version"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(repo)},
+        check=False,
+    )
+    assert r.returncode == 0
+    assert __version__ in r.stdout
+    assert "backup-projects" in r.stdout

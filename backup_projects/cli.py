@@ -24,6 +24,8 @@ except ImportError:
     print("error: install PyYAML: pip install -r requirements.txt", file=sys.stderr)
     sys.exit(1)
 
+from . import __version__
+
 LOG = logging.getLogger("backup_projects")
 
 VALID_MODES = ("update", "copy", "tgz")
@@ -351,12 +353,13 @@ def _run(cmd: list[str]) -> None:
         raise BackupError(f"command failed ({r.returncode}): {shlex.join(cmd)}")
 
 
-def _is_remote(dest: str) -> bool:
-    return ":" in dest and not dest.startswith("/")
+def _is_rsync_remote_spec(spec: str) -> bool:
+    """True for rsync remote URLs: user@host:/path, host:/path (user optional), host::module/path, etc."""
+    return ":" in spec and not spec.startswith("/")
 
 
 def _local_target_root(target: str) -> Path:
-    if _is_remote(target):
+    if _is_rsync_remote_spec(target):
         raise BackupError("internal: local path expected")
     return Path(target).expanduser().resolve()
 
@@ -370,9 +373,9 @@ def _local_backup_sync_roots(
     """Локальные пути для sync: задачи с per-job или глобальным force_sync + корень при глобальном."""
     roots: set[Path] = set()
     for _, _, tgt, _, _, _, _, _, job_fs in tasks:
-        if not _is_remote(tgt) and (global_force_sync or job_fs):
+        if not _is_rsync_remote_spec(tgt) and (global_force_sync or job_fs):
             roots.add(_local_target_root(tgt))
-    if not _is_remote(root_target) and global_force_sync:
+    if not _is_rsync_remote_spec(root_target) and global_force_sync:
         roots.add(_local_target_root(root_target))
     return sorted(roots, key=lambda p: str(p))
 
@@ -438,17 +441,23 @@ def mode_update(
     if sync_delete:
         base = base + ["--delete"]
     for src, name in sources:
-        src_path = Path(src).expanduser()
-        if not src_path.is_dir():
-            raise BackupError(f"source is not a directory: {src_path}")
-        if _is_remote(target):
+        if _is_rsync_remote_spec(src):
+            src_rsync = src.rstrip("/") + "/"
+            log_src: str | Path = src
+        else:
+            src_path = Path(src).expanduser()
+            if not src_path.is_dir():
+                raise BackupError(f"source is not a directory: {src_path}")
+            src_rsync = str(src_path) + "/"
+            log_src = src_path
+        if _is_rsync_remote_spec(target):
             dest = target.rstrip("/") + "/" + name + "/"
         else:
             root = _local_target_root(target)
             root.mkdir(parents=True, exist_ok=True)
             dest = str(root / name) + "/"
-        cmd = base + [str(src_path) + "/", dest]
-        LOG.info("mode=update rsync %s -> %s", src_path, dest)
+        cmd = base + [src_rsync, dest]
+        LOG.info("mode=update rsync %s -> %s", log_src, dest)
         _run(cmd)
 
 
@@ -460,18 +469,24 @@ def mode_copy(
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = _rsync_base() + rsync_extra
     for src, name in sources:
-        src_path = Path(src).expanduser()
-        if not src_path.is_dir():
-            raise BackupError(f"source is not a directory: {src_path}")
+        if _is_rsync_remote_spec(src):
+            src_rsync = src.rstrip("/") + "/"
+            log_src: str | Path = src
+        else:
+            src_path = Path(src).expanduser()
+            if not src_path.is_dir():
+                raise BackupError(f"source is not a directory: {src_path}")
+            src_rsync = str(src_path) + "/"
+            log_src = src_path
         dest_name = f"{name}-{stamp}"
-        if _is_remote(target):
+        if _is_rsync_remote_spec(target):
             dest = target.rstrip("/") + "/" + dest_name + "/"
         else:
             root = _local_target_root(target)
             root.mkdir(parents=True, exist_ok=True)
             dest = str(root / dest_name) + "/"
-        cmd = base + [str(src_path) + "/", dest]
-        LOG.info("mode=copy rsync %s -> %s", src_path, dest)
+        cmd = base + [src_rsync, dest]
+        LOG.info("mode=copy rsync %s -> %s", log_src, dest)
         _run(cmd)
 
 
@@ -550,12 +565,23 @@ def mode_tgz(
         archives: list[Path] = []
         names: list[str] = []
         for src, name in sources:
-            src_path = Path(src).expanduser()
-            if not src_path.exists():
-                raise BackupError(f"source does not exist: {src_path}")
-            real_dir = src_path.resolve()
-            if not real_dir.is_dir():
-                raise BackupError(f"source is not a directory: {src_path}")
+            if _is_rsync_remote_spec(src):
+                fetch_dir = Path(tmpdir) / "fetch" / name
+                fetch_dir.mkdir(parents=True, exist_ok=True)
+                remote_src = src.rstrip("/") + "/"
+                fetch_cmd = base + [remote_src, str(fetch_dir) + "/"]
+                LOG.info("tgz: rsync fetch %s -> %s", src, fetch_dir)
+                _run(fetch_cmd)
+                real_dir = fetch_dir.resolve()
+                if not real_dir.is_dir():
+                    raise BackupError(f"source is not a directory after fetch: {src}")
+            else:
+                src_path = Path(src).expanduser()
+                if not src_path.exists():
+                    raise BackupError(f"source does not exist: {src_path}")
+                real_dir = src_path.resolve()
+                if not real_dir.is_dir():
+                    raise BackupError(f"source is not a directory: {src_path}")
             arc = Path(tmpdir) / archive_basename(name)
             tar_cmd = ["tar", "-czf", str(arc), "-C", str(real_dir.parent), real_dir.name]
             LOG.debug("run: %s", shlex.join(tar_cmd))
@@ -565,7 +591,7 @@ def mode_tgz(
             archives.append(arc)
             names.append(name)
             LOG.info("created archive: %s", arc)
-        if _is_remote(target):
+        if _is_rsync_remote_spec(target):
             if rotate and max_count is not None:
                 LOG.warning(
                     "rotate/max_count ignored for remote target %s (local prune only)",
@@ -598,7 +624,7 @@ def mode_tgz(
 
 def place_success_flag(cfg: dict[str, Any], target: str) -> None:
     rel = str(cfg.get("success_flag", ".backup-success")).lstrip("/")
-    if _is_remote(target):
+    if _is_rsync_remote_spec(target):
         _write_success_flag_remote(target, rel)
     else:
         root = _local_target_root(target)
@@ -798,30 +824,50 @@ def resolve_log_path(cfg: dict[str, Any], cli_log: str | None) -> Path | None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Backup directories via rsync from YAML config.")
+    ap = argparse.ArgumentParser(
+        prog="backup-projects",
+        description=(
+            "Резервное копирование каталогов по конфигурации YAML (rsync, журнал, флаг успеха). "
+            "Режимы: update — инкремент, copy — копия с меткой времени, tgz — архив .tgz."
+        ),
+        epilog=(
+            "Примеры:\n"
+            "  %(prog)s -c backup-config.yaml\n"
+            "  %(prog)s -c ~/backup-config.yaml -v\n"
+            "  %(prog)s -c config.yaml --log-file /var/log/backup.log -q\n\n"
+            "Полное описание: README.md; пример конфигурации: config.example.yaml."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="показать версию и выйти",
+    )
     ap.add_argument(
         "-c",
         "--config",
         default="backup-config.yaml",
-        help="path to YAML config (default: ./backup-config.yaml)",
+        help="путь к YAML-конфигу (по умолчанию: ./backup-config.yaml)",
     )
     ap.add_argument(
         "-l",
         "--log-file",
         default=None,
-        help="append detailed log to this file (overrides log_file and log_filename)",
+        help="дописывать подробный журнал в файл (перекрывает log_file и log_filename в YAML)",
     )
     ap.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="debug messages on stderr",
+        help="режим отладки: сообщения DEBUG в stderr",
     )
     ap.add_argument(
         "-q",
         "--quiet",
         action="store_true",
-        help="only warnings and errors on stderr",
+        help="только предупреждения и ошибки в stderr",
     )
     args = ap.parse_args()
 

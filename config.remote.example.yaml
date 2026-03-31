@@ -1,5 +1,5 @@
 # Пример: резервное копирование на удалённый сервер через rsync по SSH.
-# Формат цели: user@host:/абсолютный/путь (как у scp). Rsync вызывает ssh(1) сам;
+# Формат цели: user@host:/абсолютный/путь или host:/путь (пользователь необязателен). Rsync вызывает ssh(1) сам;
 # отдельные команды scp/sftp в скрипте не используются — тот же канал, что и у SFTP/SCP в OpenSSH.
 #
 # Перед запуском: ssh-ключ на сервер, проверка `ssh user@host`, каталог назначения с правами записи.
@@ -12,6 +12,10 @@ default_mode: update
 sources:
   - path: /home/you/projects/app
     name: app
+  # Источник на другой машине (без user@ — тот же пользователь, что и в ssh для этого Host):
+  # - path: "nas:/export/photos"
+  #   name: photos
+  #   mode: update
   # - path: /home/you/big
   #   enable: false
   # Несколько целей; у объекта в targets можно задать свой mode:
